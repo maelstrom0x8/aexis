@@ -1,0 +1,50 @@
+{
+    "nodes": [
+        {
+            "id": "A",
+            "label": "Station A",
+            "coordinate": {
+                "x": 0,
+                "y": 0
+            },
+            "adj": [
+                {
+                    "node_id": "B",
+                    "weight": 1.0
+                }
+            ]
+        },
+        {
+            "id": "B",
+            "label": "Station B",
+            "coordinate": {
+                "x": 100,
+                "y": 0
+            },
+            "adj": [
+                {
+                    "node_id": "A",
+                    "weight": 1.0
+                },
+                {
+                    "node_id": "C",
+                    "weight": 1.0
+                }
+            ]
+        },
+        {
+            "id": "C",
+            "label": "Station C",
+            "coordinate": {
+                "x": 200,
+                "y": 0
+            },
+            "adj": [
+                {
+                    "node_id": "B",
+                    "weight": 1.0
+                }
+            ]
+        }
+    ]
+}

@@ -1,0 +1,35 @@
+
+.dark-theme {
+    background: #1a1a1a;
+    color: #e5e5e5;
+}
+
+.status-online {
+    color: #10b981;
+}
+
+.status-offline {
+    color: #ef4444;
+}
+
+.status-warning {
+    color: #f59e0b;
+}
+
+/* Custom scrollbar for event stream */
+#event-stream::-webkit-scrollbar {
+    width: 8px;
+}
+
+#event-stream::-webkit-scrollbar-track {
+    background: #1f2937;
+}
+
+#event-stream::-webkit-scrollbar-thumb {
+    background: #374151;
+    border-radius: 4px;
+}
+
+#event-stream::-webkit-scrollbar-thumb:hover {
+    background: #4b5563;
+}
