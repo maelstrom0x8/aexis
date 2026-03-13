@@ -114,13 +114,19 @@ async def test_pod_routing_and_delivery_lifecycle(aexis_system, local_message_bu
     assert len(station_17.passenger_queue) == 1, "Station should have received event and updated queue"
     
     # 3. Decision Making happens reactively in AexisSystem._handle_event
-    # Patch sleep to speed up pods
-    with patch('aexis.core.pod.asyncio.sleep', new_callable=AsyncMock):
-        # We may need a tiny sleep to allow the async event dispatch to complete if needed,
-        # but LocalMessageBus is immediate.
+    # Patch sleep to speed up pods but still yield control to background tasks
+    _real_sleep = asyncio.sleep
+    async def mock_sleep(duration):
+        await _real_sleep(0)  # Yield to event loop
         
-        # Verify Route Calculation (triggered by the event!)
-        assert pod.current_route is not None, "Pod should have reactively calculated a route"
+    with patch('aexis.core.pod.asyncio.sleep', side_effect=mock_sleep):
+        # Yield to the event loop so create_task'd broadcast handlers can run
+        # (system._handle_event uses asyncio.create_task for broadcast)
+        for _ in range(5):
+            await _real_sleep(0)
+
+        # Verify Route Calculation (triggered by the event via claim-before-route)
+        assert pod.current_route is not None, "Pod should have claimed request and calculated a route"
         assert origin_station_id in pod.current_route.stations, "Route should include pickup station"
         assert pod.status == PodStatus.EN_ROUTE
         
@@ -147,9 +153,11 @@ async def test_pod_routing_and_delivery_lifecycle(aexis_system, local_message_bu
         assert reached, f"Pod failed to reach pickup after {ticks} ticks"
         
         # Verify pickup actually happened (wait for loading if needed)
-        # Pickup involves sleep, so pod might be LOADING
+        # Pickup involves sleep, so pod might be LOADING.
+        # Also yield to the event loop so the _handle_station_arrival create_task can execute.
         timeout = 0
         while len(pod.passengers) == 0 and timeout < 20:
+             await asyncio.sleep(0)  # Yield to let pending tasks (pickup) run
              await pod.update(1.0)
              timeout += 1
              
@@ -192,6 +200,7 @@ async def test_pod_routing_and_delivery_lifecycle(aexis_system, local_message_bu
         # Verify unloading happens
         timeout = 0
         while len(pod.passengers) > 0 and timeout < 20:
+             await asyncio.sleep(0)  # Yield to let pending tasks (delivery) run
              await pod.update(1.0)
              timeout += 1
 

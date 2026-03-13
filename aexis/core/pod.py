@@ -447,6 +447,10 @@ class Pod(EventProcessor):
         """Execute delivery at station (overridden by subclasses)"""
         pass
 
+    async def _handle_request_broadcast(self, request: dict):
+        """No-op base: subclasses override to claim and route for a specific request."""
+        pass
+
     async def _publish_decision_event(self, decision: Decision):
         """Publish pod decision event"""
         event = PodDecision(
@@ -501,34 +505,26 @@ class Pod(EventProcessor):
 
         while dist_to_travel > 0:
             if not self.current_segment:
-                # End of route reached
+                # End of route: _handle_route_completion is fast (snap + publish)
+                # and must be awaited so the UI and status are updated before this
+                # tick returns.  The slow work (docking sleep, pickup, AI) is
+                # fire-and-forgot inside _handle_route_completion via create_task.
                 await self._handle_route_completion()
                 return True
 
             remaining_on_edge = self.current_segment.length - self.segment_progress
 
             if dist_to_travel >= remaining_on_edge:
-                # Overflow case: Complete this edge and continue to next
+                # Overflow case: complete this edge and continue to next
                 dist_to_travel -= remaining_on_edge
-
-                # Capture the node we just arrived at
-                arrived_node = self.current_segment.end_node
                 self._advance_segment()
 
                 if not self.current_segment:
-                    # logger.warning(
-                    #     f"[{self.pod_id}]: Checking station arrival at {arrived_node}")
-                    
-                    # Fix: Handle station arrival asynchronously to prevent blocking physics loop
-                    # If this was awaited, a slow decision (e.g. AI call) would freeze the entire simulation
-                    asyncio.create_task(self._handle_station_arrival(arrived_node))
-                    
-                    # If pod is now loading/unloading, stop movement for this tick
-                    # If pod is now loading/unloading, stop movement for this tick
-                    if self.status in [PodStatus.LOADING, PodStatus.UNLOADING]:
-                        return True
+                    # Last segment just exhausted: same pattern as above.
+                    await self._handle_route_completion()
+                    return True
             else:
-                # Normal case: Move along current edge
+                # Normal case: move along current edge
                 self.segment_progress += dist_to_travel
                 dist_to_travel = 0
 
@@ -552,60 +548,75 @@ class Pod(EventProcessor):
         # print(f"[{self.pod_id}]: Current segment after advance: {self.current_segment.segment_id if self.current_segment else 'None'}")
 
     def _update_location_descriptor(self):
-        """Update the public location descriptor based on internal physics state"""
+        """Update the public location descriptor based on internal physics state.
+
+        A pod is only considered at a station when it has completed a segment and
+        _handle_station_arrival (or _handle_route_completion) explicitly sets the
+        location_type to "station".  While a current_segment is active the pod is
+        always on an edge, even if segment_progress == 0.0 (i.e. it just started
+        the segment — the start node is a graph vertex, not a stop).
+        """
         if not self.current_segment:
             return
 
-        # Interpolate exact position
         current_coord = self.current_segment.get_point_at_distance(
             self.segment_progress)
 
-        if self.segment_progress == 0.0:
-            # At start of segment = At start node (Station)
-            self.location_descriptor = LocationDescriptor(
-                location_type="station",
-                node_id=self.current_segment.start_node,
-                coordinate=current_coord
-            )
-        else:
-            self.location_descriptor = LocationDescriptor(
-                location_type="edge",
-                edge_id=self.current_segment.segment_id,
-                coordinate=current_coord,
-                distance_on_edge=self.segment_progress
-            )
+        # Always edge-typed while traversing a segment.
+        # Progress == 0.0 means we just entered the segment; the start vertex is
+        # NOT an operational station stop — it is merely the segment origin.
+        self.location_descriptor = LocationDescriptor(
+            location_type="edge",
+            edge_id=self.current_segment.segment_id,
+            coordinate=current_coord,
+            distance_on_edge=self.segment_progress
+        )
 
     async def _handle_route_completion(self):
-        """Handle arrival at destination"""
-        # Snap to final station coordinate before clearing route
-        if self.current_route and self.current_route.stations:
-            final_station = self.current_route.stations[-1]
-            from .network import NetworkContext
-            nc = NetworkContext.get_instance()
-            pos = nc.station_positions.get(final_station, (0, 0))
+        """Handle arrival at the final destination of the current route.
 
-            self.location_descriptor = LocationDescriptor(
-                location_type="station",
-                node_id=final_station,
-                coordinate=Coordinate(pos[0], pos[1])
-            )
+        Ordering is critical:
+        1. Snap location to the final station (UI consistency).
+        2. Schedule _handle_station_arrival BEFORE clearing route state so the
+           arrival handler still sees a coherent context (e.g. route.stations).
+        3. Publish the terminal position update.
+        4. Do NOT set status=IDLE here — _handle_station_arrival owns that
+           transition and will trigger the next decision afterward.
+        """
+        if not (self.current_route and self.current_route.stations):
+            # Degenerate route — just idle.
+            self.status = PodStatus.IDLE
+            self.segment_progress = 0.0
+            await self._publish_position_update()
+            await self._publish_status_update()
+            return
 
-            # Handle station arrival (pickup/delivery)
-            # Use create_task to avoid blocking the physics loop
-            asyncio.create_task(self._handle_station_arrival(final_station))
+        final_station = self.current_route.stations[-1]
+        from .network import NetworkContext
+        nc = NetworkContext.get_instance()
+        pos = nc.station_positions.get(final_station, (0, 0))
 
-        self.status = PodStatus.IDLE
+        self.location_descriptor = LocationDescriptor(
+            location_type="station",
+            node_id=final_station,
+            coordinate=Coordinate(pos[0], pos[1])
+        )
+
+        # Publish terminal position before the route is cleared so the UI
+        # receives a "station" location update.
+        await self._publish_position_update()
+
+        # Schedule pickup/delivery BEFORE clearing route so the arrival handler
+        # can inspect current_route.stations if needed.
+        asyncio.create_task(self._handle_station_arrival(final_station))
+
+        # Clear movement state — but leave status for _handle_station_arrival
+        # to own (it calls make_decision() which sets EN_ROUTE when a route is found).
         self.current_route = None
         self.segment_progress = 0.0
 
-        await self._publish_position_update()
         await self._publish_status_update()
-        logger.info(f"Pod {self.pod_id} arrived at destination")
-
-        # Remain idle after arrival. A new decision should be triggered by:
-        # - a reactive system event (e.g. PassengerArrival/CargoRequest)
-        # - an explicit command
-        # This prevents oscillation/patrol back-and-forth when no payloads are available.
+        logger.info(f"Pod {self.pod_id} arrived at destination {final_station}")
 
     async def _handle_station_arrival(self, station_id: str):
         """Handle arrival at a station for pickup/delivery
@@ -765,15 +776,81 @@ class PassengerPod(Pod):
         return PodType.PASSENGER
 
     async def _handle_station_arrival(self, station_id: str):
-        """Handle passenger pickup/delivery at station"""
-        self.status = PodStatus.IDLE
-        event = PodArrival(pod_id=self.pod_id, station_id=station_id)
-        # logger.warning(f"Pod {self.pod_id} arrived at station {station_id}, checking for passengers")
-        await self.message_bus.publish_event(MessageBus.get_event_channel(event.event_type), event)
-        await self._execute_pickup(station_id)
-        await self._execute_delivery(station_id)
-        # Trigger routing decision for next leg (whether pickup happened or not)
-        await self.make_decision()
+        """Handle passenger pickup/delivery at station (concurrency-safe)."""
+        if self._arrival_lock.locked():
+            logger.warning(
+                f"Pod {self.pod_id} ignoring concurrent _handle_station_arrival at {station_id}"
+            )
+            return
+
+        async with self._arrival_lock:
+            self.status = PodStatus.IDLE
+            event = PodArrival(pod_id=self.pod_id, station_id=station_id)
+            await self.message_bus.publish_event(
+                MessageBus.get_event_channel(event.event_type), event
+            )
+            # Deliver first to free capacity before attempting pickup.
+            await self._execute_delivery(station_id)
+            await self._execute_pickup(station_id)
+            # Trigger routing decision for next leg (whether pickup happened or not)
+            await self.make_decision()
+
+    async def _handle_request_broadcast(self, request: dict):
+        """Attempt to claim an inbound passenger request and route to pick it up.
+
+        Called by the system when a PassengerArrival event fires.  Every
+        eligible PassengerPod receives the broadcast; only the one that wins
+        the atomic station claim actually changes its route.
+
+        Eligibility (checked before attempting the claim):
+        - Pod has spare capacity.
+        - Pod is IDLE, or already inbound to/through the origin station, or
+          will drop off passengers at the origin station (freeing capacity).
+        """
+        try:
+            if request.get("type") != "passenger":
+                return
+
+            remaining_capacity = self.capacity - len(self.passengers)
+            if remaining_capacity <= 0:
+                logger.debug(f"Pod {self.pod_id}: no capacity, skipping broadcast claim")
+                return
+
+            origin = request.get("origin")
+            passenger_id = request.get("passenger_id", "")
+            if not origin or not passenger_id:
+                return
+
+            # Check eligibility: idle, inbound, or delivering at origin
+            is_eligible = False
+            if self.status == PodStatus.IDLE:
+                is_eligible = True
+            elif self.status == PodStatus.EN_ROUTE and self.current_route:
+                if origin in self.current_route.stations:
+                    is_eligible = True
+                elif origin in self.delivery_route:
+                    is_eligible = True
+
+            if not is_eligible:
+                return
+
+            # Race to claim: only one pod wins
+            station = self._stations.get(origin)
+            if not station:
+                return
+
+            if not station.claim_passenger(passenger_id, self.pod_id):
+                # Lost the race — another pod already claimed it
+                return
+
+            logger.info(f"Pod {self.pod_id}: claimed passenger {passenger_id} at {origin}")
+
+            # Won the claim — add to available requests and decide a route
+            self._available_requests.append(request)
+            await self.make_decision()
+        except Exception as e:
+            logger.error(f"Pod {self.pod_id}: error in _handle_request_broadcast: {e}", exc_info=True)
+
 
     async def _execute_pickup(self, station_id: str):
         """Execute passenger pickup at station using live queue query and claim system"""
@@ -792,29 +869,33 @@ class PassengerPod(Pod):
             pickups = [r for r in self._available_requests if r.get(
                 "origin") == station_id and r.get("type") == "passenger"]
         else:
-            # Get pending (unclaimed) passengers from station
-            pending = station.get_pending_passengers()
-            logger.info(
-                f"Pod {self.pod_id}: execute_passenger_pickup at {station_id}, {len(pending)} pending passengers")
-            
-            # Claim passengers atomically (prevents double-pickup)
             pickups = []
-            for p in pending[:remaining_capacity]:
-                passenger_id = p.get("passenger_id")
-                
-                # ADVERSARIAL FIX: check if passenger already somehow on board (Zombie check)
-                if any(existing.get("passenger_id") == passenger_id for existing in self.passengers):
-                    logger.warning(
-                        f"Pod {self.pod_id}: Passenger {passenger_id} already on board! Skipping duplicate pickup.")
-                    continue
 
-                if station.claim_passenger(passenger_id, self.pod_id):
-                    pickups.append(p)
-                    # Remove from available requests locally to prevent re-routing to it
-                    self._available_requests = [
-                        r for r in self._available_requests
-                        if r.get("passenger_id") != passenger_id
-                    ]
+            # 1. Board passengers already pre-claimed by this pod (claim-before-route)
+            for p in station.get_claimed_passengers(self.pod_id):
+                passenger_id = p.get("passenger_id")
+                if any(e.get("passenger_id") == passenger_id for e in self.passengers):
+                    continue  # Zombie guard: already on board
+                pickups.append(p)
+
+            # 2. Opportunistically claim and board any additional unclaimed
+            #    passengers at this station up to remaining capacity
+            extra_capacity = remaining_capacity - len(pickups)
+            if extra_capacity > 0:
+                for p in station.get_pending_passengers()[:extra_capacity]:
+                    passenger_id = p.get("passenger_id")
+                    if any(e.get("passenger_id") == passenger_id for e in self.passengers):
+                        continue
+                    if station.claim_passenger(passenger_id, self.pod_id):
+                        pickups.append(p)
+                        self._available_requests = [
+                            r for r in self._available_requests
+                            if r.get("passenger_id") != passenger_id
+                        ]
+
+            logger.info(
+                f"Pod {self.pod_id}: execute_passenger_pickup at {station_id}, "
+                f"{len(pickups)} passengers to board")
 
         if not pickups:
             logger.debug(
@@ -827,7 +908,6 @@ class PassengerPod(Pod):
         # Simulate loading time: 5 seconds per passenger
         loading_time = len(pickups) * 5
         await asyncio.sleep(loading_time)
-
         from .model import PassengerPickedUp
         for p in pickups:
             passenger = {
@@ -836,7 +916,6 @@ class PassengerPod(Pod):
                 "pickup_time": datetime.now(UTC)
             }
             self.passengers.append(passenger)
-
             # Notify system/station
             event = PassengerPickedUp(
                 passenger_id=passenger["passenger_id"],
@@ -855,6 +934,8 @@ class PassengerPod(Pod):
 
     async def _execute_delivery(self, station_id: str):
         """Execute passenger delivery at station"""
+        if not self.passengers:
+            return
         delivered = [p for p in self.passengers if p.get(
             'destination') == station_id]
 
@@ -1015,6 +1096,63 @@ class CargoPod(Pod):
             await self._execute_delivery(station_id)
             # Trigger routing decision for next leg
             await self.make_decision()
+
+    async def _handle_request_broadcast(self, request: dict):
+        """Attempt to claim an inbound cargo request and route to pick it up.
+
+        Called by the system when a CargoRequest event fires.  Every eligible
+        CargoPod receives the broadcast; only the one that wins the atomic
+        station claim actually changes its route.
+
+        Eligibility:
+        - Pod has spare weight capacity.
+        - Pod is IDLE, or already inbound to/through the origin station, or
+          will deliver cargo there (freeing weight capacity for pickup).
+        """
+        try:
+            if request.get("type") != "cargo":
+                return
+
+            req_weight = float(request.get("weight", 0.0) or 0.0)
+            remaining_capacity = self.weight_capacity - self.current_weight
+            if remaining_capacity < req_weight:
+                logger.debug(f"Pod {self.pod_id}: insufficient weight capacity for cargo broadcast")
+                return
+
+            origin = request.get("origin")
+            request_id = request.get("request_id", "")
+            if not origin or not request_id:
+                return
+
+            # Check eligibility: idle, inbound, or delivering at origin
+            is_eligible = False
+            if self.status == PodStatus.IDLE:
+                is_eligible = True
+            elif self.status == PodStatus.EN_ROUTE and self.current_route:
+                if origin in self.current_route.stations:
+                    is_eligible = True
+                elif origin in self.delivery_route:
+                    is_eligible = True
+
+            if not is_eligible:
+                return
+
+            # Race to claim: only one pod wins
+            station = self._stations.get(origin)
+            if not station:
+                return
+
+            if not station.claim_cargo(request_id, self.pod_id):
+                # Lost the race — another pod already claimed it
+                return
+
+            logger.info(f"Pod {self.pod_id}: claimed cargo {request_id} at {origin}")
+
+            # Won the claim — add to available requests and decide a route
+            self._available_requests.append(request)
+            await self.make_decision()
+        except Exception as e:
+            logger.error(f"Pod {self.pod_id}: error in _handle_request_broadcast: {e}", exc_info=True)
 
     async def _execute_pickup(self, station_id: str):
         """Execute cargo pickup at station using live queue query and claim system"""

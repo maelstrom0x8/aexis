@@ -9,7 +9,7 @@ from typing import Any, Mapping
 from .ai_provider import AIProviderFactory
 from .errors import handle_exception
 from .message_bus import LocalMessageBus, MessageBus
-from .model import SystemSnapshot
+from .model import SystemSnapshot, Coordinate, PodStatus
 from .network import (
     NetworkContext,
     load_network_data,
@@ -312,9 +312,13 @@ class AexisSystem:
         )
 
     async def _handle_event(self, data: dict):
-        """Handle incoming events and trigger reactive actions"""
+        """React to PassengerArrival / CargoRequest by broadcasting to eligible pods.
+
+        Each pod independently races to claim the specific request at the station.
+        Only the pod that wins the atomic station claim routes to pick it up;
+        all others silently return without changing their state.
+        """
         try:
-            from .model import PodStatus
             message = data.get("message", {})
             event_type = message.get("event_type", "")
 
@@ -322,93 +326,72 @@ class AexisSystem:
             if not event_data:
                 event_data = message
 
-            seeded_request: dict | None = None
+            if event_type not in ("PassengerArrival", "CargoRequest"):
+                return
+
             if event_type == "PassengerArrival":
-                seeded_request = {
+                station_id = event_data.get("station_id")
+                request = {
                     "type": "passenger",
                     "passenger_id": event_data.get("passenger_id", ""),
-                    "origin": event_data.get("station_id"),
+                    "origin": station_id,
                     "destination": event_data.get("destination", ""),
                     "priority": event_data.get("priority"),
                 }
-            elif event_type == "CargoRequest":
-                seeded_request = {
+            else:  # CargoRequest
+                station_id = event_data.get("origin")
+                request = {
                     "type": "cargo",
                     "request_id": event_data.get("request_id", ""),
-                    "origin": event_data.get("origin"),
+                    "origin": station_id,
                     "destination": event_data.get("destination", ""),
                     "weight": event_data.get("weight", 0.0),
                     "priority": event_data.get("priority"),
                 }
 
-            # React to arrivals by triggering idle pods
-            if event_type in ["PassengerArrival", "CargoRequest"]:
-                station_id = event_data.get("station_id") or event_data.get("origin")
-                # logger.warning(f"Station {station_id} processing event")
-                
-                # First, prioritize pods already at the station
-                if station_id:
-                    for pod in self.pods.values():
-                        st = pod.status.value 
-                        at_station = self._pod_is_at_station(pod, station_id)
-                        # logger.warning(f"Pod {pod.pod_id} is {st} and {at_station or 'not'} at station {station_id}")
-                        if (pod.status == PodStatus.IDLE or pod.status.value == "idle") and self._pod_is_at_station(pod, station_id):
-                            # logger.warning(f"Pod {pod.pod_id} is idle => {pod.status != PodStatus.IDLE}")
-                            # logger.warning(f"Prioritizing docked pod {pod.pod_id} at {station_id} for new {event_type}")
-                            await self._populate_pod_requests(pod)
-                            if seeded_request:
-                                if seeded_request.get("type") == "passenger":
-                                    pid = seeded_request.get("passenger_id")
-                                    if pid and not any(r.get("passenger_id") == pid for r in pod._available_requests):
-                                        pod._available_requests.append(seeded_request)
-                                elif seeded_request.get("type") == "cargo":
-                                    rid = seeded_request.get("request_id")
-                                    if rid and not any(r.get("request_id") == rid for r in pod._available_requests):
-                                        pod._available_requests.append(seeded_request)
-                            if len(pod._available_requests) > 0:
-                                await pod.make_decision()
-                
-                # Then, trigger other idle pods globally if no local pods available
-                for pod in self.pods.values():
-                    # logger.warning(f"Checking pod {pod.pod_id} for event {event_type} at station {station_id}")
-                    if pod.status.value == "idle" and not self._pod_is_at_station(pod, station_id):
-                        await self._populate_pod_requests(pod)
-                        if seeded_request:
-                            if seeded_request.get("type") == "passenger":
-                                pid = seeded_request.get("passenger_id")
-                                if pid and not any(r.get("passenger_id") == pid for r in pod._available_requests):
-                                    pod._available_requests.append(seeded_request)
-                            elif seeded_request.get("type") == "cargo":
-                                rid = seeded_request.get("request_id")
-                                if rid and not any(r.get("request_id") == rid for r in pod._available_requests):
-                                    pod._available_requests.append(seeded_request)
-                        if len(pod._available_requests) > 0:
-                            await pod.make_decision()
+            if not station_id or station_id not in self.stations:
+                return
+
+            # Broadcast to all eligible pods. Eligibility is checked inside each
+            # pod's _handle_request_broadcast before the claim attempt, so we
+            # broadcast broadly and let the atomic claim be the arbiter.
+            for pod in list(self.pods.values()):
+                # Filter by pod type to avoid pointless cross-type calls
+                from .pod import PassengerPod, CargoPod
+                if event_type == "PassengerArrival" and not isinstance(pod, PassengerPod):
+                    continue
+                if event_type == "CargoRequest" and not isinstance(pod, CargoPod):
+                    continue
+
+                # Fire-and-forget per pod: each runs its eligibility check + claim
+                # independently. create_task so pods run concurrently and the race
+                # is fair (first awaited claim wins).
+                asyncio.create_task(pod._handle_request_broadcast(request))
 
         except Exception as e:
-            logger.debug(f"AexisSystem event handling error: {e}")
+            logger.debug(f"AexisSystem event handling error: {e}", exc_info=True)
 
-    def _pod_is_at_station(self, pod: Pod, station_id: str) -> bool:
-        """Check if pod is currently at the specified station"""
-        try:
-            # Check if pod's location descriptor indicates it's at the station
-            if (pod.location_descriptor.location_type == "station" and 
-                pod.location_descriptor.node_id == station_id):
+    def _is_pod_eligible_for_request(self, pod: Pod, origin_station: str) -> bool:
+        """Return True if the pod should attempt to claim a request at origin_station.
+
+        A pod is eligible if:
+        - It is IDLE (can freely divert), OR
+        - It is EN_ROUTE and its current route passes through / ends at origin_station, OR
+        - It is EN_ROUTE and it will deliver payload at origin_station (freeing capacity).
+
+        Note: this helper is intentionally NOT called from _handle_event — eligibility
+        is evaluated inside each pod's _handle_request_broadcast atomically.  It is
+        provided here for unit-testing and future use by the periodic decision cycle.
+        """
+        if pod.status == PodStatus.IDLE:
+            return True
+        if pod.status == PodStatus.EN_ROUTE and pod.current_route:
+            if origin_station in pod.current_route.stations:
                 return True
-            
-            # Check if pod is on an edge connected to this station
-            if (pod.location_descriptor.location_type == "edge" and 
-                pod.current_segment):
-                # Pod is considered "at" station if it's very close to either end
-                edge = pod.current_segment
-                if (edge.start_node == station_id or edge.end_node == station_id) and \
-                   pod.segment_progress < 5.0:  # Within 5 meters of station
-                    return True
-            
-            return False
-        except Exception as e:
-            logger.debug(f"Error checking pod location: {e}")
-            return False
+            delivery_route = getattr(pod, "delivery_route", [])
+            if origin_station in delivery_route:
+                return True
+        return False
 
     async def _initialize_ai_provider(self):
         """Initialize AI provider based on configuration"""
@@ -659,10 +642,13 @@ class AexisSystem:
                 f"at position ({coordinate.x:.1f}, {coordinate.y:.1f})"
             )
 
+            # Populate available requests BEFORE the initial decision so the
+            # routing strategy sees real payload demand and does not produce an
+            # idle route (which would stop the pod permanently on its first tick).
+            await self._populate_pod_requests(pod)
             await pod.make_decision()
 
             # Publish initial position update for UI rendering
-            # Use asyncio.create_task to fire-and-forget without blocking pod creation
             asyncio.create_task(pod._publish_position_update())
 
     def _create_routing_provider(self, pod_id: str) -> RoutingProvider:
@@ -764,22 +750,62 @@ class AexisSystem:
                 await asyncio.sleep(60)  # Wait before retrying
 
     async def _periodic_decision_making(self):
-        """Trigger periodic decision making for pods"""
+        """Fallback periodic dispatch for pods that have been idle too long.
+
+        The reactive claim-before-route dispatch in _handle_event is the primary
+        mechanism.  This loop only kicks in for pods that missed all broadcasts —
+        e.g. they became idle after all relevant events had already fired — by
+        re-broadcasting any unclaimed requests that are still waiting at stations.
+        """
         while self.running:
             try:
-                # Trigger decision making for idle pods
-                for pod in self.pods.values():
-                    if pod.status.value == "idle":
-                        # Populate available requests from queues before decision
-                        await self._populate_pod_requests(pod)
-                        await pod.make_decision()
+                await asyncio.sleep(30)  # Run every 30 s
 
-                # Wait before next round
-                await asyncio.sleep(30)  # Every 30 seconds
+                idle_threshold_secs = 60.0
+                now = datetime.now(UTC)
+
+                from .pod import PassengerPod, CargoPod
+
+                for pod in list(self.pods.values()):
+                    if pod.status != PodStatus.IDLE:
+                        continue
+
+                    # Only act on pods that have been idle long enough
+                    idle_secs = (
+                        (now - pod.movement_start_time).total_seconds()
+                        if pod.movement_start_time
+                        else idle_threshold_secs + 1
+                    )
+                    if idle_secs < idle_threshold_secs:
+                        continue
+
+                    # Re-broadcast unclaimed requests from all stations to this pod
+                    if isinstance(pod, PassengerPod):
+                        for station_id, station in self.stations.items():
+                            for p in station.get_pending_passengers():
+                                request = {
+                                    "type": "passenger",
+                                    "passenger_id": p.get("passenger_id", ""),
+                                    "origin": station_id,
+                                    "destination": p.get("destination", ""),
+                                    "priority": p.get("priority"),
+                                }
+                                asyncio.create_task(pod._handle_request_broadcast(request))
+                    elif isinstance(pod, CargoPod):
+                        for station_id, station in self.stations.items():
+                            for c in station.get_pending_cargo():
+                                request = {
+                                    "type": "cargo",
+                                    "request_id": c.get("request_id", ""),
+                                    "origin": station_id,
+                                    "destination": c.get("destination", ""),
+                                    "weight": c.get("weight", 0.0),
+                                    "priority": c.get("priority"),
+                                }
+                                asyncio.create_task(pod._handle_request_broadcast(request))
 
             except Exception as e:
-                logger.debug(
-                    f"Periodic decision making error: {e}", exc_info=True)
+                logger.debug(f"Periodic decision making error: {e}", exc_info=True)
                 await asyncio.sleep(60)
 
     async def _populate_pod_requests(self, pod: Pod):
@@ -952,14 +978,18 @@ class AexisSystem:
             throughput_per_hour = 0
 
         # Calculate fallback rate
+        # Only AIRouter pods have a decision_engine; guard access accordingly.
+        pods_with_engine = [
+            pod for pod in self.pods.values() if hasattr(pod, "decision_engine")
+        ]
         total_decisions = sum(
-            len(pod.decision_engine.decision_history) for pod in self.pods.values()
+            len(pod.decision_engine.decision_history) for pod in pods_with_engine
         )
         fallback_usage_rate = 0.0
         if total_decisions > 0:
             fallback_decisions = sum(
                 sum(1 for d in pod.decision_engine.decision_history if d.fallback_used)
-                for pod in self.pods.values()
+                for pod in pods_with_engine
             )
             fallback_usage_rate = fallback_decisions / total_decisions
 

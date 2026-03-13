@@ -411,6 +411,31 @@ class Station(EventProcessor):
             pending = [c for c in pending if c.get("destination") == destination]
         return pending
 
+    def get_claimed_passengers(self, pod_id: str) -> list[dict]:
+        """Return passengers in this station's queue that were pre-claimed by pod_id.
+
+        Used during arrival to board passengers that were claimed at dispatch
+        time via the broadcast mechanism.
+
+        Args:
+            pod_id: ID of the claiming pod
+
+        Returns:
+            List of passenger dicts claimed by this pod and not yet boarded
+        """
+        return [p for p in self.passenger_queue if p.get("claimed_by") == pod_id]
+
+    def get_claimed_cargo(self, pod_id: str) -> list[dict]:
+        """Return cargo in this station's queue that was pre-claimed by pod_id.
+
+        Args:
+            pod_id: ID of the claiming pod
+
+        Returns:
+            List of cargo dicts claimed by this pod and not yet loaded
+        """
+        return [c for c in self.cargo_queue if c.get("claimed_by") == pod_id]
+
     def claim_passenger(self, passenger_id: str, pod_id: str) -> bool:
         """Atomically claim a passenger for a pod.
         

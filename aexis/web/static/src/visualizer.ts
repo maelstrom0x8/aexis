@@ -107,6 +107,15 @@ interface StationPayload {
   createdAt: number;
 }
 
+interface Particle {
+  gfx: PIXI.Graphics;
+  angle: number;
+  baseRadius: number;
+  angularSpeed: number;
+  oscillationAmplitude: number;
+  phase: number;
+}
+
 interface PodLocation {
   location_type: "edge" | "node" | "station";
   node_id: string;
@@ -140,25 +149,19 @@ class NetworkVisualizer {
   viewport: PIXI.Container | null;
   gridLayer: PIXI.Graphics | null;
   spineLayer: PIXI.Graphics | null;
+  payloadLayer: PIXI.Container | null;
   nodeLayer: PIXI.Graphics | null;
   podLayer: PIXI.Container | null;
   spines: Map<string, PathSpine>;
   nodes: Map<string, Node>;
   pods: Map<string, Pod>;
   stationPayloads: Map<string, StationPayload>;
-  indicatorLayer: PIXI.Container | null;
-  labelLayer: PIXI.Container | null = null;
-  hoveredLabel: PIXI.Text | null = null;
   hoveredNodeId: string | null = null;
 
   stationWaitingCounts: Map<string, { passenger: number; cargo: number }> =
     new Map();
-  stationDeliveredCounts: Map<
-    string,
-    { passenger: number; cargo: number; expiresAtMs: number | null }
-  > = new Map();
-  stationWaitingText: Map<string, PIXI.Text> = new Map();
-  stationDeliveredText: Map<string, PIXI.Text> = new Map();
+  
+  stationParticles: Map<string, Particle[]> = new Map();
 
   constructor(canvasId: string) {
     this.canvas = document.getElementById(canvasId);
@@ -201,10 +204,9 @@ class NetworkVisualizer {
     this.viewport = null;
     this.gridLayer = null;
     this.spineLayer = null;
+    this.payloadLayer = null;
     this.nodeLayer = null;
     this.podLayer = null;
-    this.labelLayer = null;
-    this.indicatorLayer = null;
 
     this.init();
   }
@@ -228,17 +230,14 @@ class NetworkVisualizer {
     this.spineLayer = new PIXI.Graphics();
     this.viewport.addChild(this.spineLayer);
 
+    this.payloadLayer = new PIXI.Container();
+    this.viewport.addChild(this.payloadLayer);
+
     this.nodeLayer = new PIXI.Graphics();
     this.viewport.addChild(this.nodeLayer);
 
     this.podLayer = new PIXI.Container();
     this.viewport.addChild(this.podLayer);
-
-    this.indicatorLayer = new PIXI.Container();
-    this.viewport.addChild(this.indicatorLayer);
-
-    this.labelLayer = new PIXI.Container();
-    this.viewport.addChild(this.labelLayer);
 
     // Interaction
     this.setupInteraction();
@@ -250,14 +249,6 @@ class NetworkVisualizer {
     this.drawGrid();
     this.drawSpines();
     this.drawNodes();
-
-    this.labelLayer.interactive = true;
-    this.labelLayer.interactiveChildren = false;
-    this.labelLayer.hitArea = new PIXI.Rectangle(0, 0, 10000, 10000); // Full canvas
-
-    this.labelLayer.on("pointermove", (event: PIXI.FederatedPointerEvent) => {
-      this.handlePodHover(event);
-    });
 
     // Tick
     this.app.ticker.add((delta: number) => this.animate(delta));
@@ -419,9 +410,12 @@ class NetworkVisualizer {
 
     // Update position data
     if (location) {
-      // Correctly track spineId and station status
-      const isAtStation =
-        location.location_type === "station" || !!location.node_id;
+      // A pod is "at a station" only when the server explicitly reports
+      // location_type === "station".  Do NOT use node_id presence as a
+      // proxy — PodLocation always carries a node_id even for edge positions,
+      // which would incorrectly clear the spineId and remove the pod from
+      // the movement interpolator on every update.
+      const isAtStation = location.location_type === "station";
 
       pod.data = {
         ...pod.data,
@@ -482,6 +476,7 @@ class NetworkVisualizer {
    */
   handleEvent(channel: string, eventData: any): void {
     const eventType = eventData.event_type;
+    console.debug(`[Visualizer] Event: ${eventType} (channel: ${channel})`, eventData);
 
     if (eventType.includes("PodPositionUpdate")) {
       this.handlePodPositionUpdate(eventData as PodPositionUpdate);
@@ -500,13 +495,6 @@ class NetworkVisualizer {
     } else if (eventType.includes("CargoLoaded")) {
       this.incrementWaiting(eventData.station_id, "cargo", -1);
     }
-
-    // Delivery flash at destination station (count-based, expires)
-    if (eventType.includes("PassengerDelivered")) {
-      this.incrementDelivered(eventData.station_id, "passenger", 1);
-    } else if (eventType.includes("CargoDelivered")) {
-      this.incrementDelivered(eventData.station_id, "cargo", 1);
-    }
   }
 
   private incrementWaiting(
@@ -516,6 +504,8 @@ class NetworkVisualizer {
   ): void {
     if (!stationId) return;
     const formattedId = this.formatStationId(stationId);
+    
+    console.debug(`[Visualizer] Increment ${type} at ${formattedId} by ${delta}`);
     const current = this.stationWaitingCounts.get(formattedId) || {
       passenger: 0,
       cargo: 0,
@@ -529,105 +519,59 @@ class NetworkVisualizer {
     this.renderWaitingIndicator(formattedId);
   }
 
-  private incrementDelivered(
-    stationId: string | undefined,
-    type: "passenger" | "cargo",
-    delta: number,
-  ): void {
-    if (!stationId) return;
-    const now = Date.now();
-    const formattedId = this.formatStationId(stationId);
-    const current = this.stationDeliveredCounts.get(formattedId) || {
-      passenger: 0,
-      cargo: 0,
-      expiresAtMs: null as number | null,
-    };
-    current[type] = Math.max(0, (current[type] || 0) + delta);
-    current.expiresAtMs = now + 2000;
-    this.stationDeliveredCounts.set(formattedId, current);
-    this.renderDeliveredIndicator(formattedId);
-  }
 
   private renderWaitingIndicator(stationId: string): void {
-    if (!this.indicatorLayer) return;
+    if (!this.payloadLayer) return;
     const formattedId = this.formatStationId(stationId);
     const counts = this.stationWaitingCounts.get(formattedId);
-    const total = (counts?.passenger || 0) + (counts?.cargo || 0);
+    const targetCount = (counts?.passenger || 0) + (counts?.cargo || 0);
     const node = this.nodes.get(formattedId);
     if (!node) return;
 
-    const existing = this.stationWaitingText.get(formattedId);
-    if (total <= 0) {
-      if (existing) {
-        this.indicatorLayer.removeChild(existing);
-        existing.destroy();
-        this.stationWaitingText.delete(stationId);
+    let particles = this.stationParticles.get(formattedId) || [];
+
+    // Sync particle count
+    if (particles.length < targetCount) {
+      // Spawn new particles
+      const toSpawn = targetCount - particles.length;
+      for (let i = 0; i < toSpawn; i++) {
+        const gfx = new PIXI.Graphics();
+        gfx.beginFill(0xff0000, 0.5);
+        gfx.drawCircle(0, 0, 2);
+        gfx.endFill();
+        this.payloadLayer.addChild(gfx);
+
+        const angle = Math.random() * Math.PI * 2;
+        const baseRadius = 6 + Math.random() * 10;
+        
+        const particle: Particle = {
+          gfx,
+          angle,
+          baseRadius,
+          angularSpeed: 0.2 + Math.random() * 0.6,
+          oscillationAmplitude: 1 + Math.random() * 1,
+          phase: Math.random() * Math.PI * 2
+        };
+        
+        // Initial position
+        gfx.x = node.x + Math.cos(angle) * baseRadius;
+        gfx.y = node.y + Math.sin(angle) * baseRadius;
+        
+        particles.push(particle);
       }
-      return;
+    } else if (particles.length > targetCount) {
+      // Remove extra particles
+      const toRemove = particles.length - targetCount;
+      const removed = particles.splice(-toRemove);
+      for (const p of removed) {
+        this.payloadLayer.removeChild(p.gfx);
+        p.gfx.destroy();
+      }
     }
 
-    const passengerCount = counts?.passenger || 0;
-    const cargoCount = counts?.cargo || 0;
-    const label = `P:${passengerCount} C:${cargoCount}`;
-
-    const style = new PIXI.TextStyle({
-      fontFamily: "monospace",
-      fontSize: 12,
-      fill: 0xffffff,
-      stroke: 0x000000,
-      strokeThickness: 2,
-    });
-
-    const txt = existing || new PIXI.Text(label, style);
-    txt.text = label;
-    txt.x = node.x + 10;
-    txt.y = node.y + 10;
-    if (!existing) {
-      this.stationWaitingText.set(formattedId, txt);
-      this.indicatorLayer.addChild(txt);
-    }
+    this.stationParticles.set(formattedId, particles);
   }
 
-  private renderDeliveredIndicator(stationId: string): void {
-    if (!this.indicatorLayer) return;
-    const formattedId = this.formatStationId(stationId);
-    const counts = this.stationDeliveredCounts.get(formattedId);
-    const total = (counts?.passenger || 0) + (counts?.cargo || 0);
-    const node = this.nodes.get(formattedId);
-    if (!node) return;
-
-    const existing = this.stationDeliveredText.get(formattedId);
-    if (total <= 0) {
-      if (existing) {
-        this.indicatorLayer.removeChild(existing);
-        existing.destroy();
-        this.stationDeliveredText.delete(stationId);
-      }
-      return;
-    }
-
-    const passengerCount = counts?.passenger || 0;
-    const cargoCount = counts?.cargo || 0;
-    const label = `DEL P:${passengerCount} C:${cargoCount}`;
-
-    const style = new PIXI.TextStyle({
-      fontFamily: "monospace",
-      fontSize: 12,
-      fill: 0x00ff66,
-      stroke: 0x000000,
-      strokeThickness: 2,
-    });
-
-    const txt = existing || new PIXI.Text(label, style);
-    txt.text = label;
-    txt.x = node.x + 10;
-    txt.y = node.y - 24;
-    txt.alpha = 1.0;
-    if (!existing) {
-      this.stationDeliveredText.set(formattedId, txt);
-      this.indicatorLayer.addChild(txt);
-    }
-  }
 
   syncPods(podsData: Record<string, any>): void {
     const now = Date.now();
@@ -714,6 +658,7 @@ class NetworkVisualizer {
   }
 
   animate(delta: number): void {
+    const now = Date.now();
     // Current time delta in seconds (assuming 60fps baseline for PIXI delta=1.0)
     const dt = delta / 60;
     const lerpFactor = 0.15; // Increased slightly for snappier catch-up
@@ -754,34 +699,28 @@ class NetworkVisualizer {
       pod.gfx.rotation = Math.atan2(sample.tangent.y, sample.tangent.x);
     });
 
-    // Delivered indicator expiry & fade
-    const now = Date.now();
-    for (const [
-      stationId,
-      delivered,
-    ] of this.stationDeliveredCounts.entries()) {
-      if (!delivered.expiresAtMs) continue;
-      const remaining = delivered.expiresAtMs - now;
-      const txt = this.stationDeliveredText.get(stationId);
+    // 3. Particle Animation (Orbital Oscillation)
+    const timeInSeconds = now / 1000;
+    this.stationParticles.forEach((particles, stationId) => {
+      const node = this.nodes.get(stationId);
+      if (!node) return;
 
-      if (remaining <= 0) {
-        this.stationDeliveredCounts.set(stationId, {
-          passenger: 0,
-          cargo: 0,
-          expiresAtMs: null,
-        });
-        if (txt && this.indicatorLayer) {
-          this.indicatorLayer.removeChild(txt);
-          txt.destroy();
-          this.stationDeliveredText.delete(stationId);
-        }
-        continue;
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        
+        // Update angle
+        p.angle += p.angularSpeed * dt;
+        
+        // Oscillating radius
+        const oscillationSpeed = 2.0; // average between 1-3
+        const radius = p.baseRadius + Math.sin(timeInSeconds * oscillationSpeed + p.phase) * p.oscillationAmplitude;
+        
+        // Update position
+        p.gfx.x = node.x + Math.cos(p.angle) * radius;
+        p.gfx.y = node.y + Math.sin(p.angle) * radius;
       }
+    });
 
-      if (txt) {
-        txt.alpha = Math.max(0.0, Math.min(1.0, remaining / 2000));
-      }
-    }
   }
 
   /**
@@ -1038,102 +977,7 @@ class NetworkVisualizer {
     }
   }
 
-  getPodAtPosition(x: number, y: number, radius: number = 15): any | null {
-    for (const pod of this.pods.values()) {
-      const coordinate = pod.data?.coordinate as { x: number; y: number };
-      const dist = Math.sqrt(
-        (x - coordinate?.x) ** 2 + (y - coordinate?.y) ** 2,
-      );
-      if (dist <= radius) return pod;
-    }
-    return null;
-  }
 
-  showPodLabel(pod: any): void {
-    const style = new PIXI.TextStyle({
-      fontFamily: "monospace",
-      fontSize: 12,
-      fill: 0xffffff,
-      stroke: { color: 0x000000, width: 1 },
-      dropShadow: true,
-      dropShadowColor: 0x000000,
-      dropShadowBlur: 2,
-    });
-
-    const labelText = pod.id;
-    this.hoveredLabel = new PIXI.Text(labelText, style);
-
-    // Top-right positioning
-    this.hoveredLabel.x = pod.x + 15;
-    this.hoveredLabel.y = pod.y - 20;
-
-    this.labelLayer!.addChild(this.hoveredLabel);
-  }
-
-  handlePodHover(event: PIXI.FederatedPointerEvent): void {
-    const pos = event.getLocalPosition(this.podLayer!);
-    const pod = this.getPodAtPosition(pos.x, pos.y);
-
-    if (pod && pod.id !== this.hoveredNodeId) {
-      // Hide previous label
-      if (this.hoveredLabel) {
-        this.labelLayer!.removeChild(this.hoveredLabel);
-        this.hoveredLabel.destroy();
-        this.hoveredLabel = null;
-      }
-
-      // Show new label
-      this.showPodLabel(pod);
-      this.hoveredNodeId = pod.id;
-    } else if (!pod && this.hoveredNodeId) {
-      // Hide label when no node hovered
-      if (this.hoveredLabel) {
-        this.labelLayer!.removeChild(this.hoveredLabel);
-        this.hoveredLabel.destroy();
-        this.hoveredLabel = null;
-      }
-      this.hoveredNodeId = null;
-    }
-  }
-
-  drawPodLabel(): void {}
-
-  drawNodeLabel(): void {
-    if (!this.labelLayer) return;
-    this.labelLayer.removeChildren(); // Clear previous labels
-
-    const style = new PIXI.TextStyle({
-      fontFamily: "Arial",
-      fontSize: 12,
-      fill: "#ffffff",
-      stroke: "#000000",
-      strokeThickness: 3,
-      dropShadow: {
-        color: "#000000",
-        distance: 4,
-        angle: Math.PI / 4,
-        alpha: 0.5,
-      },
-    });
-
-    for (const node of this.nodes.values()) {
-      let labelText = `${node.id}`;
-      labelText = labelText.replace("station_", "S");
-      labelText = labelText.replace("_", "");
-      const label = new PIXI.Text(labelText, style);
-
-      // Position: top-right of node (offset by radius + padding)
-      label.x = node.x + 15; // Right of center (12px radius + 3px pad)
-      label.y = node.y - 20; // Above center (label height/2 ~15px + pad)
-
-      // Optional: anchor top-left so x/y is exact top-left corner
-      // label.anchor.set(0, 0);
-      this.labelLayer.addChild(label);
-    }
-  }
-  /**
-   * Renders topological nodes.
-   */
   drawNodes(): void {
     if (!this.nodeLayer) return;
     this.nodeLayer.clear();
@@ -1148,8 +992,6 @@ class NetworkVisualizer {
       this.nodeLayer.drawCircle(node.x, node.y, 3.5);
       this.nodeLayer.endFill();
     }
-
-    this.drawNodeLabel();
   }
 }
 

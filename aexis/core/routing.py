@@ -155,23 +155,19 @@ class OfflineRoutingStrategy(RoutingStrategy):
             if is_cargo_pod and req_type != "cargo":
                 continue
 
-            # If we are NOT at the origin, the origin is a destination for pickup
+            # For requests not yet onboard, we ONLY target the origin for pickup
             origin = req.get("origin")
             if origin and origin != context.current_location:
                 destinations.add(origin)
 
-            destination = req.get("destination")
-            if destination and destination != context.current_location:
-                destinations.add(destination)
-
-        # Add destinations of current passengers
+        # Add destinations of current passengers (payload already onboard)
         if context.passengers:
             for p in context.passengers:
                 dest = p.get("destination")
                 if dest and dest != context.current_location:
                     destinations.add(dest)
 
-        # Add destinations of current cargo
+        # Add destinations of current cargo (payload already onboard)
         if context.cargo:
             for c in context.cargo:
                 dest = c.get("destination")
@@ -183,34 +179,33 @@ class OfflineRoutingStrategy(RoutingStrategy):
     def _solve_traveling_salesman(
         self, start: str, destinations: list[str]
     ) -> list[str]:
-        """Nearest-neighbor TSP approximation"""
+        """Nearest-neighbor TSP approximation (Truncated to first stop)
+        
+        Note: To ensure the pod stops at every pickup/delivery point, we only 
+        calculate the path to the FIRST nearest destination. The pod will 
+        re-decide upon arrival.
+        """
         if not destinations:
             return [start]
 
-        full_route = [start]
         current = start
         unvisited = destinations.copy()
-
-        while unvisited:
-            nearest = self._find_nearest_station(current, unvisited)
-            try:
-                path = nx.shortest_path(
-                    self.network_context.network_graph,
-                    current,
-                    nearest,
-                    weight="weight",
-                )
-                # Skip current to avoid duplication
-                if len(path) > 1:
-                    full_route.extend(path[1:])
-            except (nx.NetworkXNoPath, nx.NodeNotFound):
-                # Fallback: just add nearest directly
-                full_route.append(nearest)
-
-            unvisited.remove(nearest)
-            current = nearest
-
-        return full_route
+        
+        # Find the nearest destination
+        nearest = self._find_nearest_station(current, unvisited)
+        
+        try:
+            # Return path only to that first stop
+            path = nx.shortest_path(
+                self.network_context.network_graph,
+                current,
+                nearest,
+                weight="weight",
+            )
+            return path
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            # Fallback for disconnected graph
+            return [start, nearest]
 
     def _find_nearest_station(self, current: str, candidates: list[str]) -> str:
         """Find nearest station from candidates"""
