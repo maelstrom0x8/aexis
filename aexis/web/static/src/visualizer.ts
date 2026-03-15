@@ -114,6 +114,8 @@ interface Particle {
   angularSpeed: number;
   oscillationAmplitude: number;
   phase: number;
+  dying: boolean;
+  alpha: number;
 }
 
 interface PodLocation {
@@ -157,6 +159,7 @@ class NetworkVisualizer {
   pods: Map<string, Pod>;
   stationPayloads: Map<string, StationPayload>;
   hoveredNodeId: string | null = null;
+  selectedPodId: string | null = null;
 
   stationWaitingCounts: Map<string, { passenger: number; cargo: number }> =
     new Map();
@@ -285,6 +288,9 @@ class NetworkVisualizer {
     let lastMouse = { x: 0, y: 0 };
 
     this.app.stage.on("pointerdown", (e: PIXI.FederatedPointerEvent) => {
+      // Prioritize pod selection if we clicked on one (handled by pod's own events)
+      // Otherwise fallback to pan toggle
+      if (e.target !== this.app?.stage) return;
       isPanDragging = true;
       lastMouse = { x: e.global.x, y: e.global.y };
     });
@@ -296,7 +302,71 @@ class NetworkVisualizer {
         lastMouse = { x: e.global.x, y: e.global.y };
         this.updateViewport();
       }
+
+      // Station Hit Testing for tooltips
+      const worldPos = this.toWorld(e.global.x, e.global.y);
+      let foundNodeId: string | null = null;
+      let minHovDistSq = 625; // Hit radius ~25px squared
+
+      for (const [id, node] of this.nodes) {
+        const distSq = (worldPos.x - node.x) ** 2 + (worldPos.y - node.y) ** 2;
+        if (distSq < minHovDistSq) {
+          foundNodeId = id;
+          minHovDistSq = distSq;
+        }
+      }
+
+      const tooltip = document.getElementById("station-tooltip");
+      if (foundNodeId) {
+        const node = this.nodes.get(foundNodeId)!;
+        const counts = this.stationWaitingCounts.get(foundNodeId) || { passenger: 0, cargo: 0 };
+        const screenPos = this.fromWorld(node.x, node.y);
+        
+        if (this.hoveredNodeId !== foundNodeId) {
+          this.hoveredNodeId = foundNodeId;
+          const label = "AEXIS-" + foundNodeId;
+          
+          if (tooltip) {
+            document.getElementById("tooltip-title")!.textContent = label;
+            document.getElementById("tooltip-pax-count")!.textContent = counts.passenger.toString();
+            document.getElementById("tooltip-cargo-count")!.textContent = counts.cargo.toString();
+            
+            // Color status green or red arbitrarily or based on queues
+            const statusBadge = document.getElementById("tooltip-status")!;
+            statusBadge.textContent = "ONLINE";
+            statusBadge.className = "px-2 py-0.5 rounded text-xs font-semibold uppercase tracking-wider border text-emerald-400 border-emerald-500/50 bg-emerald-900/30";
+            
+            tooltip.classList.remove("hidden");
+            tooltip.classList.add("opacity-100");
+          }
+        }
+
+        // Update Position on tick/move safely
+        if (tooltip) {
+          tooltip.style.left = `${screenPos.x}px`;
+          tooltip.style.top = `${screenPos.y - (tooltip.clientHeight || 120) - 10}px`;
+        }
+
+      } else {
+        if (this.hoveredNodeId) {
+          this.hoveredNodeId = null;
+          if (tooltip) {
+            tooltip.classList.remove("opacity-100");
+            tooltip.classList.add("hidden");
+          }
+        }
+      }
     });
+
+    // Close button for statusbar
+    const closeBtn = document.getElementById("pod-sb-close");
+    if (closeBtn) {
+      closeBtn.addEventListener("click", () => {
+        this.selectedPodId = null;
+        document.getElementById("pod-statusbar")?.classList.add("hidden");
+      });
+    }
+
   }
 
   centerView(): void {
@@ -321,13 +391,15 @@ class NetworkVisualizer {
     };
   }
 
+  fromWorld(worldX: number, worldY: number): Vector2 {
+    return {
+      x: worldX * this.zoom + this.pan.x,
+      y: worldY * this.zoom + this.pan.y,
+    };
+  }
+
   private formatStationId(id: string | number): string {
-    const numericId = typeof id === "string" ? parseInt(id) : id;
-    if (!isNaN(numericId)) {
-      return `station_${numericId.toString().padStart(3, "0")}`;
-    }
-    const idStr = id.toString();
-    return idStr.startsWith("station_") ? idStr : `station_${idStr}`;
+    return id.toString();
   }
 
   drawGrid(): void {
@@ -550,7 +622,9 @@ class NetworkVisualizer {
           baseRadius,
           angularSpeed: 0.2 + Math.random() * 0.6,
           oscillationAmplitude: 1 + Math.random() * 1,
-          phase: Math.random() * Math.PI * 2
+          phase: Math.random() * Math.PI * 2,
+          dying: false,
+          alpha: 1.0,
         };
         
         // Initial position
@@ -560,12 +634,14 @@ class NetworkVisualizer {
         particles.push(particle);
       }
     } else if (particles.length > targetCount) {
-      // Remove extra particles
+      // Mark excess live particles as dying (fade-out instead of instant destroy)
       const toRemove = particles.length - targetCount;
-      const removed = particles.splice(-toRemove);
-      for (const p of removed) {
-        this.payloadLayer.removeChild(p.gfx);
-        p.gfx.destroy();
+      let marked = 0;
+      for (let i = particles.length - 1; i >= 0 && marked < toRemove; i--) {
+        if (!particles[i].dying) {
+          particles[i].dying = true;
+          marked++;
+        }
       }
     }
 
@@ -638,10 +714,18 @@ class NetworkVisualizer {
 
     // Glow aura
     gfx.beginFill(podColor, 0.3);
-    gfx.drawCircle(0, 0, 6);
+    gfx.drawCircle(0, 0, 8); // Slightly larger aura for better clicking
     gfx.endFill();
 
     if (this.podLayer) this.podLayer.addChild(gfx);
+
+    // Make Pod Interactive
+    gfx.eventMode = "static";
+    gfx.cursor = "pointer";
+    gfx.on("pointerdown", (e: PIXI.FederatedPointerEvent) => {
+      e.stopPropagation(); // Prevents panning from triggering
+      this.selectedPodId = id;
+    });
 
     return {
       id,
@@ -659,6 +743,7 @@ class NetworkVisualizer {
 
   animate(delta: number): void {
     const now = Date.now();
+
     // Current time delta in seconds (assuming 60fps baseline for PIXI delta=1.0)
     const dt = delta / 60;
     const lerpFactor = 0.15; // Increased slightly for snappier catch-up
@@ -699,20 +784,33 @@ class NetworkVisualizer {
       pod.gfx.rotation = Math.atan2(sample.tangent.y, sample.tangent.x);
     });
 
-    // 3. Particle Animation (Orbital Oscillation)
+    // 3. Particle Animation (Orbital Oscillation + Fade-Out)
     const timeInSeconds = now / 1000;
+    const fadeSpeed = 2.0; // alpha per second → ~0.5s full fade
     this.stationParticles.forEach((particles, stationId) => {
       const node = this.nodes.get(stationId);
       if (!node) return;
 
-      for (let i = 0; i < particles.length; i++) {
+      for (let i = particles.length - 1; i >= 0; i--) {
         const p = particles[i];
+
+        // Fade-out dying particles
+        if (p.dying) {
+          p.alpha -= fadeSpeed * dt;
+          if (p.alpha <= 0) {
+            this.payloadLayer!.removeChild(p.gfx);
+            p.gfx.destroy();
+            particles.splice(i, 1);
+            continue;
+          }
+          p.gfx.alpha = p.alpha;
+        }
         
         // Update angle
         p.angle += p.angularSpeed * dt;
         
         // Oscillating radius
-        const oscillationSpeed = 2.0; // average between 1-3
+        const oscillationSpeed = 2.0;
         const radius = p.baseRadius + Math.sin(timeInSeconds * oscillationSpeed + p.phase) * p.oscillationAmplitude;
         
         // Update position
@@ -721,7 +819,56 @@ class NetworkVisualizer {
       }
     });
 
+    this.updateUI();
   }
+
+  updateUI(): void {
+    const sb = document.getElementById("pod-statusbar");
+    if (!sb) return;
+
+    if (!this.selectedPodId || !this.pods.has(this.selectedPodId)) {
+      sb.classList.add("hidden");
+      return;
+    }
+
+    const pod = this.pods.get(this.selectedPodId)!;
+    sb.classList.remove("hidden");
+
+    // Re-style UI slightly based on type
+    const borderEl = document.getElementById("pod-sb-border")!;
+    const iconEl = document.getElementById("pod-sb-icon")!;
+
+    if (pod.podType === "passenger") {
+      borderEl.className = "bg-gray-900 bg-opacity-90 backdrop-blur-xl p-4 rounded-2xl border border-emerald-500/30 shadow-[0_0_20px_rgba(16,185,129,0.1)] flex items-center gap-6 shadow-2xl min-w-[500px]";
+      iconEl.className = "w-12 h-12 rounded-xl flex items-center justify-center bg-gray-800 border border-emerald-500/50 text-emerald-400";
+    } else {
+      borderEl.className = "bg-gray-900 bg-opacity-90 backdrop-blur-xl p-4 rounded-2xl border border-amber-500/30 shadow-[0_0_20px_rgba(245,158,11,0.1)] flex items-center gap-6 shadow-2xl min-w-[500px]";
+      iconEl.className = "w-12 h-12 rounded-xl flex items-center justify-center bg-gray-800 border border-amber-500/50 text-amber-400";
+    }
+
+    document.getElementById("pod-sb-id")!.textContent = pod.id;
+    document.getElementById("pod-sb-speed")!.textContent = pod.velocity.toFixed(1);
+
+    // Status logic
+    const serverStatus = String(pod.data.status || "IDLE").toUpperCase();
+    document.getElementById("pod-sb-status")!.textContent = serverStatus;
+
+    // Load Metrics
+    let currentLoad = 0;
+    let maxLoad = 0;
+
+    if (pod.podType === "passenger") {
+      currentLoad = Array.isArray(pod.data.passengers) ? pod.data.passengers.length : 0;
+      maxLoad = Number(pod.data.capacity) || 4; // Defaults
+    } else {
+      currentLoad = Number(pod.data.current_weight) || 0;
+      maxLoad = Number(pod.data.weight_capacity) || 1200;
+    }
+
+    document.getElementById("pod-sb-load")!.textContent = currentLoad.toString();
+    document.getElementById("pod-sb-capacity")!.textContent = `/${maxLoad}`;
+  }
+
 
   /**
    * Offline Routing: REMOVED
