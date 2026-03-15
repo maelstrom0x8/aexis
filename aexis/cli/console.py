@@ -352,6 +352,92 @@ class AexisCLI(cmd.Cmd):
         except Exception as e:
             self._error(f"Failed to inject cargo request: {str(e)}")
 
+    def do_watch(self, args: str) -> None:
+        """Watch live system state: watch [interval_seconds]"""
+        if not self._check_connection():
+            return
+
+        interval = 1.0
+        if args.strip():
+            try:
+                interval = float(args.strip())
+            except ValueError:
+                self._error("Interval must be a number")
+                return
+
+        import time
+        from tabulate import tabulate
+
+        try:
+            while True:
+                # Fetch fresh state
+                state = self.client.get_system_state()
+                pods = self.client.get_all_pods()
+                stations = self.client.get_all_stations()
+
+                # Clear screen
+                os.system("clear" if os.name == "posix" else "cls")
+
+                # Print System Metrics
+                uptime = int(state.get("uptime_seconds", 0))
+                uptime_fmt = f"{uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s"
+                metrics = state.get("metrics", {})
+
+                print("=" * 60)
+                print("AEXIS LIVE DASHBOARD".center(60))
+                print("=" * 60)
+                sys_data = [
+                    ["Status", "🟢 RUNNING" if state.get("running") else "🔴 STOPPED"],
+                    ["Uptime", uptime_fmt],
+                    ["Pods", f"{metrics.get('active_pods', 0)}/{metrics.get('total_pods', 0)} active"],
+                    ["Stations", f"{metrics.get('operational_stations', 0)} operational"],
+                    ["Pending Pax", metrics.get("pending_passengers", 0)],
+                    ["Pending Cargo", metrics.get("pending_cargo", 0)],
+                ]
+                print(tabulate(sys_data, tablefmt="plain"))
+                print()
+
+                # Print Pods
+                if pods:
+                    pods_data = []
+                    for pid in sorted(pods.keys())[:15]:  # Limit to 15 pods to fit on screen
+                        pstate = pods[pid]
+                        pods_data.append([
+                            pid,
+                            pstate.get("status", "unknown").upper(),
+                            pstate.get("current_spine", "N/A"),
+                            f"{pstate.get('speed', 0):.1f} m/s",
+                            pstate.get("load_type", "empty")
+                        ])
+                    print("Active Pods (Top 15):")
+                    print(tabulate(pods_data, headers=["ID", "Status", "Spine", "Speed", "Load"], tablefmt="simple"))
+                    print()
+
+                # Print Stations
+                if stations:
+                    st_data = []
+                    for sid in sorted(stations.keys())[:10]:
+                        sstate = stations[sid]
+                        st_data.append([
+                            sid,
+                            sstate.get("status", "unknown").upper(),
+                            len(sstate.get("queues", {}).get("passengers", {}).get("waiting", 0) if isinstance(sstate.get("queues"), dict) else sstate.get("passenger_queue", [])),
+                            len(sstate.get("queues", {}).get("cargo", {}).get("waiting", 0) if isinstance(sstate.get("queues"), dict) else sstate.get("cargo_queue", [])),
+                        ])
+                    print("Stations (Top 10):")
+                    print(tabulate(st_data, headers=["ID", "Status", "Pax Wait", "Cargo Wait"], tablefmt="simple"))
+                    print()
+                
+                print(f"Updating every {interval}s... Press Ctrl+C to exit.")
+                time.sleep(interval)
+                
+        except KeyboardInterrupt:
+            # Graceful exit from watch mode
+            print("\nExited watch mode.")
+            return
+        except Exception as e:
+            self._error(f"Watch failed: {e}")
+
     # --- Navigation Commands ---
 
     def do_help(self, args: str) -> None:

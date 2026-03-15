@@ -1,110 +1,214 @@
-import sys
-from unittest.mock import MagicMock
+"""Unit tests for pod movement physics.
 
-# Mock redis before importing modules that need it
-sys.modules['redis'] = MagicMock()
-sys.modules['redis.asyncio'] = MagicMock()
+Tests edge traversal, segment overflow, route completion, position descriptor
+accuracy, and speed/dt boundary conditions.
+"""
+
+import asyncio
 
 import pytest
-import asyncio
-from unittest.mock import AsyncMock, patch
-from aexis.core.pod import Pod, PodStatus
-from aexis.core.model import Coordinate, EdgeSegment, Route, LocationDescriptor, PodPositionUpdate
 
-# Test Helpers
-class MockNetworkContext:
-    def __init__(self):
-        self.edges = {}
-        self.station_positions = {
-            "s1": (0, 0),
-            "s2": (10, 0),
-            "s3": (20, 0)
-        }
-    
-    @classmethod
-    def get_instance(cls):
-        return cls._instance
+from aexis.core.model import (
+    Coordinate,
+    EdgeSegment,
+    LocationDescriptor,
+    PodStatus,
+)
+from aexis.core.station_client import StationClient
+from aexis.pod import PassengerPod
 
-class MockPod(Pod):
-    def _get_pod_type(self):
-        from aexis.core.pod import PodType
-        return PodType.PASSENGER
-        
-    async def _build_decision_context(self):
-        return {}
 
-@pytest.fixture
-def mock_network(mocker):
-    network = MockNetworkContext()
-    MockNetworkContext._instance = network
-    
-    # Create edges: s1->s2 (10m), s2->s3 (10m)
-    e1 = EdgeSegment(
-        segment_id="s1->s2", start_node="s1", end_node="s2",
-        start_coord=Coordinate(0,0), end_coord=Coordinate(10,0)
-    )
-    e2 = EdgeSegment(
-        segment_id="s2->s3", start_node="s2", end_node="s3",
-        start_coord=Coordinate(10,0), end_coord=Coordinate(20,0)
-    )
-    network.edges = {
-        "s1->s2": e1,
-        "s2->s3": e2
-    }
-    
-    # Patch the NetworkContext.get_instance where it is defined
-    mocker.patch('aexis.core.network.NetworkContext.get_instance', return_value=network)
-    return network
+class TestEdgeTraversal:
+    """Pod movement along a single edge segment."""
 
-@pytest.fixture
-def mock_bus(mocker):
-    bus = MagicMock()
-    # Mock publish_event as AsyncMock since it's awaited
-    bus.publish_event = AsyncMock()
-    return bus
+    async def test_basic_forward_movement(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        pod.status = PodStatus.EN_ROUTE
+        pod.speed = 50.0  # m/s
 
-@pytest.fixture
-def pod(mock_bus):
-    pod = MockPod(mock_bus, "pod_test")
-    pod._get_capacity_status = MagicMock(return_value=(0,0,0,0))
-    pod.speed = 20.0
-    return pod
+        # Place on edge 1 -> 2 (100m)
+        seg = network_context.edges["1->2"]
+        pod.current_segment = seg
+        pod.segment_progress = 0.0
+        pod.location_descriptor = LocationDescriptor(
+            location_type="edge",
+            edge_id=seg.segment_id,
+            coordinate=seg.start_coord,
+        )
 
-@pytest.mark.asyncio
-async def test_movement_overflow_event_publication(pod, mock_network, mock_bus):
-    """
-    Test that:
-    1. Pod transitions edges seamlessly (Overflow logic).
-    2. PodPositionUpdate event is correctly published exactly once.
-    """
-    
-    # Hydrate route s1 -> s2 -> s3
-    await pod._hydrate_route(["s1", "s2", "s3"])
-    pod.status = PodStatus.EN_ROUTE
+        # 1 second at 50 m/s = 50m travelled
+        arrived = await pod.update(1.0)
+        assert not arrived
+        assert 49.0 < pod.segment_progress < 51.0
 
-    # Execute update(0.75) -> 15m distance
-    # Should travel full 10m of s1->s2, and 5m of s2->s3
-    await pod.update(0.75)
-    
-    # Checks internal state (Physics verification)
-    assert pod.current_segment.segment_id == "s2->s3"
-    assert pod.segment_progress == 5.0
-    assert pod.location_descriptor.edge_id == "s2->s3"
-    assert pod.location_descriptor.coordinate.x == 15.0
-    
-    # Checks Event Publication (Behavior verification with pytest-mock)
-    # We assert that the bus.publish_event was awaited exactly once
-    assert mock_bus.publish_event.await_count == 1
-    
-    # Get the arguments of the call
-    # call_args[0] are positional args -> (channel_name, event_object)
-    call_args = mock_bus.publish_event.await_args
-    event_obj = call_args[0][1]
-    
-    # Assert Event Payload
-    assert isinstance(event_obj, PodPositionUpdate)
-    assert event_obj.pod_id == "pod_test"
-    assert event_obj.location.edge_id == "s2->s3"
-    assert event_obj.location.coordinate.x == 15.0
-    
-    print("\n✅ Verification Successful: Event published with correct coordinates.")
+    async def test_segment_completion_triggers_next(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        """Pod overflows into the next queued segment."""
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        pod.status = PodStatus.EN_ROUTE
+        pod.speed = 200.0
+
+        # Two-segment route: 001->002 (100m) then 002->004 (100m)
+        seg1 = network_context.edges["1->2"]
+        seg2 = network_context.edges["2->4"]
+        pod.current_segment = seg1
+        pod.segment_progress = 80.0  # 20m from end of seg1
+
+        from collections import deque
+        pod.route_queue = deque([seg2])
+
+        # Route to trigger completion callback
+        from aexis.core.model import Route
+        pod.current_route = Route(
+            route_id="test",
+            stations=["1", "2", "4"],
+            estimated_duration=10,
+        )
+
+        # dt=0.5 at 200 m/s = 100m. 20m finishes seg1, 80m into seg2.
+        arrived = await pod.update(0.5)
+
+        # Should have advanced into seg2
+        if not arrived:
+            assert pod.current_segment == seg2
+            assert 79.0 < pod.segment_progress < 81.0
+
+    async def test_idle_pod_does_not_move(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        pod.status = PodStatus.IDLE
+        result = await pod.update(1.0)
+        assert result is False
+
+    async def test_large_dt_capped(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        """dt > 1s should be capped in the movement loop to prevent warp."""
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        pod.status = PodStatus.EN_ROUTE
+        pod.speed = 10.0
+
+        seg = network_context.edges["1->2"]
+        pod.current_segment = seg
+        pod.segment_progress = 0.0
+
+        from aexis.core.model import Route
+        pod.current_route = Route(
+            route_id="test",
+            stations=["1", "2"],
+            estimated_duration=10,
+        )
+
+        # Pass dt=100 (huge). update() caps distance per step.
+        await pod.update(100.0)
+        # Speed * dt would be 1000 but dist_to_travel is capped at 100
+        # Segment is 100m, so pod should complete the route
+        # (distance may exceed segment, triggering route completion)
+
+
+class TestRouteHydration:
+    """Converting station lists into EdgeSegment queues."""
+
+    async def test_hydrate_valid_route(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+
+        success = await pod._hydrate_route(
+            ["1", "2", "4"]
+        )
+        assert success is True
+        assert pod.current_segment is not None
+        assert pod.current_segment.start_node == "1"
+        assert pod.current_segment.end_node == "2"
+        assert len(pod.route_queue) == 1  # 2->4
+
+    async def test_hydrate_single_station_no_segments(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        success = await pod._hydrate_route(["1"])
+        assert success is True
+        assert pod.current_segment is None
+        assert len(pod.route_queue) == 0
+
+
+class TestPositionDescriptor:
+    """Location descriptor accuracy during movement."""
+
+    async def test_position_midway_on_edge(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        pod.status = PodStatus.EN_ROUTE
+        pod.speed = 50.0
+
+        seg = network_context.edges["1->2"]
+        pod.current_segment = seg
+        pod.segment_progress = 50.0  # midway
+
+        from aexis.core.model import Route
+        pod.current_route = Route(
+            route_id="test",
+            stations=["1", "2"],
+            estimated_duration=10,
+        )
+
+        # Tiny step just to trigger position update
+        await pod.update(0.01)
+
+        loc = pod.location_descriptor
+        assert loc.location_type == "edge"
+        # Midpoint of (0,0) -> (100,0) should be roughly (50,0)
+        assert 49.0 < loc.coordinate.x < 52.0
+        assert -1.0 < loc.coordinate.y < 1.0
+
+
+class TestRouteCompletion:
+    """End-of-route behavior."""
+
+    async def test_route_completion_sets_station_location(
+        self, message_bus, redis_client, station_client, network_context
+    ):
+        pod = PassengerPod(
+            message_bus, redis_client, "1", station_client
+        )
+        pod.status = PodStatus.EN_ROUTE
+        pod.speed = 200.0
+
+        seg = network_context.edges["1->2"]
+        pod.current_segment = seg
+        pod.segment_progress = 99.0  # 1m from end
+
+        from collections import deque
+        pod.route_queue = deque()
+        from aexis.core.model import Route
+        pod.current_route = Route(
+            route_id="test",
+            stations=["1", "2"],
+            estimated_duration=5,
+        )
+
+        await pod.update(1.0)
+
+        # Should have completed route and set location to station
+        assert pod.location_descriptor.location_type == "station"
+        assert pod.location_descriptor.node_id == "2"

@@ -1,79 +1,81 @@
+"""AEXIS API server entry point.
+
+Connects directly to Redis — no AexisSystem dependency.
+Pod and station state is read from Redis keys written by their processes.
+
+Usage:
+    python -m aexis.api.main
+"""
+
 import asyncio
 import logging
 import os
 import sys
 
+import redis.asyncio as redis
 import uvicorn
-from aexis.api.routes import SystemAPI
-from aexis.core.system import AexisSystem, SystemContext
 
-# Configure logging
-logging.basicConfig(
-    level=logging.WARN,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(
-        sys.stdout), logging.FileHandler("aexis_core.log")],
-)
+from aexis.api.routes import SystemAPI
+from aexis.core.logging_config import setup_logging
+from aexis.core.message_bus import MessageBus
+
 logger = logging.getLogger(__name__)
 
 
 async def main():
-    """Main entry point for Core System & API"""
+    # Setup structured logging
+    setup_logging("api")
+
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    redis_password = os.getenv("REDIS_PASSWORD")
+
+    if not redis_password:
+        logger.error("REDIS_PASSWORD environment variable is required")
+        return
+
+    # Connect to Redis
+    redis_client = redis.from_url(
+        redis_url,
+        password=redis_password,
+        decode_responses=True,
+        socket_connect_timeout=10,
+        retry_on_timeout=True,
+    )
     try:
-        # Check environment
-        required_vars = ["REDIS_PASSWORD"]
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
-
-        if missing_vars:
-            logger.error(
-                f"Missing required environment variables: {missing_vars}")
-            return
-
-        logger.info("Starting AEXIS Core System...")
-
-        context = await SystemContext.initialize('/home/godelhaze/dev/megalith/aexis/aexis/aexis.json')
-
-        # Initialize System
-        system = AexisSystem(context)
-        if not await system.initialize():
-            logger.error("Failed to initialize system")
-            return
-
-        # Start System Logic (background task)
-        system_task = asyncio.create_task(system.start())
-
-        # Initialize API
-        api = SystemAPI(system)
-        app = api.get_app()
-
-        # API Configuration
-        host = os.getenv("API_HOST", "0.0.0.0")
-        port = int(os.getenv("API_PORT", "8001"))
-
-        logger.warning(
-            f"Starting System API on {host}:{port} from {os.getcwd()}")
-
-        config = uvicorn.Config(
-            app=app,
-            host=host,
-            port=port,
-            log_level="warning",
-        )
-        server = uvicorn.Server(config)
-
-        # Run server and system concurrently
-        # We need to manage the shutdown sequence carefully
-
-        try:
-            await server.serve()
-        finally:
-            logger.info("Stopping system...")
-            await system.shutdown()
-            await system_task
-
+        await redis_client.ping()
+        logger.info("Connected to Redis")
     except Exception as e:
-        logger.error(f"Core System failed: {e}", exc_info=True)
-        sys.exit(1)
+        logger.error(f"Cannot connect to Redis at {redis_url}: {e}")
+        return
+
+    # Message bus (for event publishing on manual injection + position listener)
+    message_bus = MessageBus(redis_url=redis_url, password=redis_password)
+    if not await message_bus.connect():
+        logger.error("Failed to connect MessageBus")
+        return
+
+    bus_task = asyncio.create_task(message_bus.start_listening())
+
+    # API
+    api = SystemAPI(redis_client, message_bus)
+    await api.start_listeners()
+    app = api.get_app()
+
+    host = os.getenv("API_HOST", "0.0.0.0")
+    port = int(os.getenv("API_PORT", "8001"))
+    logger.info(f"Starting AEXIS API on {host}:{port}")
+
+    config = uvicorn.Config(app=app, host=host, port=port, log_level="warning")
+    server = uvicorn.Server(config)
+
+    try:
+        await server.serve()
+    finally:
+        bus_task.cancel()
+        await message_bus.stop_listening()
+        await message_bus.disconnect()
+        await redis_client.aclose()
+        logger.info("API shut down")
 
 
 if __name__ == "__main__":

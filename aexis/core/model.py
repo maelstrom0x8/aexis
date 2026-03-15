@@ -155,12 +155,14 @@ class Command(Event):
     command_id: str = field(default_factory=lambda: str(uuid4()))
     command_type: str = ""
     target: str = ""
+    target_type: str = "system"  # "pod", "station", or "system"
     parameters: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class AssignRoute(Command):
     command_type: str = "AssignRoute"
+    target_type: str = "pod"
     target_pod: str = ""
     route: list[str] = field(default_factory=list)
     priority: int = Priority.NORMAL.value
@@ -170,6 +172,7 @@ class AssignRoute(Command):
 @dataclass
 class UpdateCapacity(Command):
     command_type: str = "UpdateCapacity"
+    target_type: str = "station"
     target_station: str = ""
     max_pods: int = 0
     processing_rate: float = 0.0

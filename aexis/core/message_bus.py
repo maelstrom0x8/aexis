@@ -314,6 +314,11 @@ class MessageBus:
             # Listen for messages
             while self.running:
                 try:
+                    # Redis requires at least one subscription before calling get_message
+                    if not self.pubsub.subscribed:
+                        await asyncio.sleep(0.1)
+                        continue
+
                     # Use get_message with timeout to allow checking self.running periodically
                     message = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                     if message:
@@ -594,7 +599,7 @@ class EventProcessor:
         """Publish command"""
         try:
             channel = MessageBus.get_command_channel(
-                command.command_type, self._get_target_type(command.target)
+                command.command_type, self._get_target_type(command)
             )
             await self.message_bus.publish_command(channel, command)
         except Exception as e:
@@ -602,15 +607,6 @@ class EventProcessor:
             logger.error(f"Failed to publish command: {error_details.message}")
             raise
 
-    def _get_target_type(self, target: str) -> str:
-        """Determine target type from ID"""
-        try:
-            if target.startswith("pod_"):
-                return "pod"
-            elif target.startswith("station_"):
-                return "station"
-            else:
-                return "system"
-        except Exception as e:
-            logger.error(f"Error determining target type for {target}: {e}")
-            return "system"
+    def _get_target_type(self, command: Command) -> str:
+        """Determine target type from command object"""
+        return getattr(command, "target_type", "system")

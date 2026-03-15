@@ -134,6 +134,10 @@ Decision Task:
         return """
 You are the AEXIS Central Routing Intelligence on DigitalOcean Gradient. 
 Optimize pod routing for efficiency and safety.
+CRITICAL ROUTING RULES:
+1. If you have passengers or cargo onboard, you MUST include their destinations in your route.
+2. Prioritize dropping off onboard payload before fulfilling new requests.
+3. The first stops in your route should be the destinations of the payload currently onboard.
 Output MUST be a single raw JSON object. No markdown. No reasoning outside JSON.
 {
     "accepted_requests": [],

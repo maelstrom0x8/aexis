@@ -224,13 +224,37 @@ class OfflineRoutingStrategy(RoutingStrategy):
         return nearest
 
     def _get_idle_route(self, current_location: str) -> dict:
-        """Get idle route (stay at current location)"""
-        return {
-            "route": [current_location],
-            "duration": 0,
-            "distance": 0,
-            "confidence": 1.0,
-        }
+        """Get idle route (cruise to nearest station to balance distribution)"""
+        nodes = list(self.network_context.network_graph.nodes())
+        if current_location in nodes:
+            nodes.remove(current_location)
+            
+        if not nodes:
+            return {
+                "route": [current_location],
+                "duration": 0,
+                "distance": 0,
+                "confidence": 1.0,
+            }
+            
+        nearest = self._find_nearest_station(current_location, nodes)
+        try:
+            path = nx.shortest_path(self.network_context.network_graph, current_location, nearest, weight="weight")
+            distance = self.network_context.calculate_distance(current_location, nearest)
+            duration = self._estimate_travel_time(distance, {})
+            return {
+                "route": path,
+                "duration": duration,
+                "distance": distance,
+                "confidence": 0.5,
+            }
+        except (nx.NetworkXNoPath, nx.NodeNotFound):
+            return {
+                "route": [current_location, nearest],
+                "duration": 5,
+                "distance": 100,
+                "confidence": 0.5,
+            }
 
     def _estimate_travel_time(self, distance: float, network_state: dict) -> int:
         """Estimate travel time in minutes"""
@@ -336,11 +360,31 @@ class AIRouter(Router):
         self.decision_engine = AIDecisionEngine(self.ai_provider, pod_id)
 
     async def route(self, context: DecisionContext) -> Route:
-        """Get route using AI with offline fallback (LSP: consistent async interface)"""
+        """Get route using AI with offline fallback, enforcing payload drop-offs"""
         try:
             decision = await self.decision_engine.make_decision(context)
+            route_stations = decision.route
+            
+            # Enforce drop-offs for onboard payload
+            mandatory_destinations = set()
+            if context.passengers:
+                for p in context.passengers:
+                    dest = p.get("destination")
+                    if dest and dest != context.current_location:
+                        mandatory_destinations.add(dest)
+            if context.cargo:
+                for c in context.cargo:
+                    dest = c.get("destination")
+                    if dest and dest != context.current_location:
+                        mandatory_destinations.add(dest)
+            
+            # Inject missing destinations into AI route
+            for dest in mandatory_destinations:
+                if dest not in route_stations:
+                    route_stations.append(dest)
+                    
             route_data = {
-                "route": decision.route,
+                "route": route_stations,
                 "duration": decision.estimated_duration,
                 "confidence": decision.confidence,
             }
@@ -348,7 +392,7 @@ class AIRouter(Router):
             logger.debug(
                 f"AI routing failed for pod {self.pod_id}, using fallback: {e}"
             )
-            # Fallback to offline routing
+            # Fallback to offline routing (which already guarantees drop-offs)
             route_data = self.fallback_strategy.calculate_optimal_route(context)
 
         return Route(

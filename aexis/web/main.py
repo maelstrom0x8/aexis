@@ -5,19 +5,16 @@ import sys
 
 import uvicorn
 
+from aexis.core.logging_config import setup_logging
 from aexis.web.dashboard import WebDashboard
 
-# Configure logging
-logging.basicConfig(
-    level=logging.WARN,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
-)
 logger = logging.getLogger(__name__)
 
 
 async def main():
     """Main entry point for Dashboard Service"""
+    # Setup structured logging
+    setup_logging("web")
     try:
         host = os.getenv("UI_HOST", "0.0.0.0")
         port = int(os.getenv("UI_PORT", "8000"))

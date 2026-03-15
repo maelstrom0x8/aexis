@@ -100,13 +100,8 @@ class NetworkContext:
             return
 
         for node in data["nodes"]:
-            # Use 3-digit padding for numeric IDs (e.g. station_001)
-            raw_id = node['id']
-            try:
-                station_num = int(raw_id)
-                station_id = f"station_{station_num:03d}"
-            except (ValueError, TypeError):
-                station_id = f"station_{raw_id}"
+            # Use raw ID from payload (e.g. "1")
+            station_id = str(node['id'])
 
             # Position
             coord = node.get("coordinate", {"x": 0, "y": 0})
@@ -116,15 +111,8 @@ class NetworkContext:
 
             # Edges
             for adj in node.get("adj", []):
-                raw_adj_id = adj['node_id']
-                try:
-                    adj_num = int(raw_adj_id)
-                    target_id = f"station_{adj_num:03d}"
-                except (ValueError, TypeError):
-                    target_id = f"station_{raw_adj_id}"
+                target_id = str(adj['node_id'])
                 weight = adj.get("weight", 1.0)
-                # We'll calculate actual distance for weight if pos is valid, else use abstract weight
-                # For now just adding edge, weight update effectively happens if we recalc
                 self.network_graph.add_edge(
                     station_id, target_id, weight=weight)
 
@@ -171,7 +159,7 @@ class NetworkContext:
         if not self.edges:
             # Fallback: spawn at first station
             station_id = list(self.station_positions.keys())[
-                0] if self.station_positions else "station_001"
+                0] if self.station_positions else "1"
             pos = self.station_positions.get(station_id, (0, 0))
             return station_id, Coordinate(pos[0], pos[1]), 0.0
 
@@ -185,10 +173,16 @@ class NetworkContext:
 
         return edge_id, coord, distance_on_edge
 
+    def get_random_station(self) -> str:
+        """Pick a random station ID from the network."""
+        if not self.station_positions:
+            return "1"
+        return random.choice(list(self.station_positions.keys()))
+
     def get_nearest_station(self, coordinate: Coordinate) -> str:
         """Find nearest station to a coordinate"""
         if not self.station_positions:
-            return "station_001"
+            return "1"
 
         nearest_station = None
         nearest_distance = float('inf')
@@ -200,7 +194,7 @@ class NetworkContext:
                 nearest_distance = distance
                 nearest_station = station_id
 
-        return nearest_station or "station_001"
+        return nearest_station or "1"
 
     def _initialize_default(self):
         """Deprecated: Logic removed to favor data-driven initialization"""
