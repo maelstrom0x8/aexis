@@ -39,7 +39,7 @@ class AexisLauncher:
 
         # Configuration (from env or defaults)
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
-        self.redis_password = os.getenv("REDIS_PASSWORD", "godelhaze")
+        self.redis_password = os.getenv("REDIS_PASSWORD", "password")
         self.network_path = os.getenv("AEXIS_NETWORK_DATA", str(self.aexis_root / "network.json"))
         self.pod_count = int(os.getenv("POD_COUNT", "12"))
         self.cargo_ratio = int(os.getenv("CARGO_RATIO", "50"))
@@ -63,7 +63,7 @@ class AexisLauncher:
                 socket_connect_timeout=2
             )
             # Flush all legacy data before starting
-            r.flushall(asynchronous=True)
+            r.flushall()
             return r.ping()
         except ImportError:
             logger.warning("redis-py not installed in launcher environment, skipping ping.")

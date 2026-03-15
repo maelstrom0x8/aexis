@@ -80,7 +80,8 @@ class Pod:
         self._arrival_lock = asyncio.Lock()
 
         # Network positioning
-        self.location_descriptor = LocationDescriptor("station", "station_001")
+        # Default to a generic numeric ID, will be updated during spawn/registration
+        self.location_descriptor = LocationDescriptor("station", "1")
         self.route_queue: Deque[EdgeSegment] = deque()
         self.current_segment: Optional[EdgeSegment] = None
         self.segment_progress: float = 0.0
@@ -113,7 +114,8 @@ class Pod:
         # Assuming that if a value is not an edge ID, it must be a station ID.
         # This simplifies the logic by removing the explicit 'station_' prefix check.
         # The system should ensure that station IDs and edge IDs are distinct.
-        if not value.startswith("edge_"): # A simple heuristic, might need refinement based on actual ID patterns
+        # Edges use "start->end" format, stations are raw numeric IDs
+        if "->" not in value:
             self.location_descriptor = LocationDescriptor(
                 location_type="station", node_id=value
             )
@@ -465,6 +467,7 @@ class Pod:
             await self._execute_delivery(station_id)
 
         logger.info(f"Pod {self.pod_id} executing decision: {decision.route}")
+        await self._publish_state_snapshot()
 
     async def _setup_pickup_delivery_routes(self, stations: list[str]):
         pass
@@ -674,6 +677,18 @@ class PassengerPod(Pod):
             if not eligible:
                 return
 
+            # Proximity-Based Claiming Delay
+            # Give docked pods a head-start to prevent "thundering herd" races
+            # from distant pods winning claims incorrectly.
+            at_station = (
+                self.location_descriptor.location_type == "station" and
+                self.location_descriptor.node_id == origin
+            )
+            if not at_station:
+                # 200ms delay for remote pods
+                logger.debug(f"Pod {self.pod_id} (remote) delaying claim for {passenger_id} at {origin}")
+                await asyncio.sleep(0.2)
+
             # Atomic claim via Redis
             if not await self.station_client.claim_passenger(
                 origin, passenger_id, self.pod_id
@@ -745,6 +760,7 @@ class PassengerPod(Pod):
 
         self.status = PodStatus.LOADING
         await self._publish_status_update()
+        await self._publish_state_snapshot()
         await asyncio.sleep(len(pickups) * 5)  # 5s per passenger
 
         for p in pickups:
@@ -773,6 +789,7 @@ class PassengerPod(Pod):
 
         self.status = PodStatus.UNLOADING
         await self._publish_status_update()
+        await self._publish_state_snapshot()
         await asyncio.sleep(len(delivered) * 5)
 
         for passenger in delivered:
@@ -929,6 +946,16 @@ class CargoPod(Pod):
             if not eligible:
                 return
 
+            # Proximity-Based Claiming Delay
+            at_station = (
+                self.location_descriptor.location_type == "station" and
+                self.location_descriptor.node_id == origin
+            )
+            if not at_station:
+                # 200ms delay for remote pods
+                logger.debug(f"Pod {self.pod_id} (remote) delaying claim for {request_id} at {origin}")
+                await asyncio.sleep(0.2)
+
             if not await self.station_client.claim_cargo(
                 origin, request_id, self.pod_id
             ):
@@ -1040,6 +1067,7 @@ class CargoPod(Pod):
         loading_time = max(1.0, (loaded_weight / 100.0) * 10.0)
         await asyncio.sleep(loading_time)
         self.status = PodStatus.EN_ROUTE
+        await self._publish_state_snapshot()
         logger.info(
             f"Pod {self.pod_id} loaded {loaded_count} cargo "
             f"({loaded_weight:.1f}kg) at {station_id}"
