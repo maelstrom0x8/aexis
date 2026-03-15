@@ -24,7 +24,8 @@ import redis.asyncio as redis
 from aexis.core.logging_config import setup_logging
 from aexis.core.message_bus import MessageBus
 from aexis.core.network import NetworkContext, load_network_data
-from aexis.station import Station, PassengerGenerator, CargoGenerator
+from aexis.core.model import PassengerArrival, CargoRequest
+from aexis.station import Station
 
 logger = logging.getLogger("aexis.station")
 
@@ -33,8 +34,6 @@ async def _handle_commands(
     redis_client: redis.Redis,
     station: Station,
     message_bus: MessageBus,
-    passenger_gen: PassengerGenerator | None,
-    cargo_gen: CargoGenerator | None,
 ):
     """Listen for dev/ops commands on a dedicated Redis channel.
 
@@ -73,46 +72,56 @@ async def _handle_commands(
                 response["state"] = station.get_state()
 
             elif cmd == "inject_passenger":
-                if not passenger_gen:
-                    response["error"] = "passenger generator not available"
+                dest = payload.get("destination", "")
+                if not dest:
+                    response["error"] = "destination required"
                 else:
-                    dest = payload.get("destination", "")
-                    if not dest:
-                        response["error"] = "destination required"
-                    else:
-                        pid = f"manual_p_{uuid.uuid4().hex[:8]}"
-                        event = passenger_gen.create_manual_event(
-                            pid, station.station_id, dest
-                        )
-                        await message_bus.publish_event(
-                            MessageBus.get_event_channel(event.event_type), event
-                        )
-                        response["injected"] = {
-                            "passenger_id": pid,
-                            "destination": dest,
-                        }
+                    pid = f"manual_p_{uuid.uuid4().hex[:8]}"
+                    # Create event directly since generators are removed
+                    event = PassengerArrival(
+                        passenger_id=pid,
+                        station_id=station.station_id,
+                        destination=dest,
+                        priority=3,
+                        group_size=1,
+                        special_needs=[],
+                        wait_time_limit=45,
+                    )
+                    await message_bus.publish_event(
+                        MessageBus.get_event_channel(event.event_type), event
+                    )
+                    response["injected"] = {
+                        "passenger_id": pid,
+                        "destination": dest,
+                    }
 
             elif cmd == "inject_cargo":
-                if not cargo_gen:
-                    response["error"] = "cargo generator not available"
+                dest = payload.get("destination", "")
+                weight = float(payload.get("weight", 100.0))
+                if not dest:
+                    response["error"] = "destination required"
                 else:
-                    dest = payload.get("destination", "")
-                    weight = float(payload.get("weight", 100.0))
-                    if not dest:
-                        response["error"] = "destination required"
-                    else:
-                        rid = f"manual_c_{uuid.uuid4().hex[:8]}"
-                        event = cargo_gen.create_manual_event(
-                            rid, station.station_id, dest, weight
-                        )
-                        await message_bus.publish_event(
-                            MessageBus.get_event_channel(event.event_type), event
-                        )
-                        response["injected"] = {
-                            "request_id": rid,
-                            "destination": dest,
-                            "weight": weight,
-                        }
+                    rid = f"manual_c_{uuid.uuid4().hex[:8]}"
+                    # Create event directly since generators are removed
+                    event = CargoRequest(
+                        request_id=rid,
+                        origin=station.station_id,
+                        destination=dest,
+                        weight=weight,
+                        volume=weight / 500.0,
+                        priority=3,
+                        hazardous=False,
+                        temperature_controlled=False,
+                        deadline=None,
+                    )
+                    await message_bus.publish_event(
+                        MessageBus.get_event_channel(event.event_type), event
+                    )
+                    response["injected"] = {
+                        "request_id": rid,
+                        "destination": dest,
+                        "weight": weight,
+                    }
             else:
                 response["error"] = f"unknown command: {cmd}"
 
@@ -188,22 +197,10 @@ async def run_station(args: argparse.Namespace):
         nc = NetworkContext.get_instance()
         all_station_ids = sorted(nc.station_positions.keys())
 
-    # Generators (only if this is the "first" station alphabetically, or
-    # controlled by --generators flag to avoid duplicates)
-    passenger_gen = None
-    cargo_gen = None
-    gen_tasks = []
-    if args.generators:
-        passenger_gen = PassengerGenerator(message_bus, all_station_ids)
-        cargo_gen = CargoGenerator(message_bus, all_station_ids)
-        gen_tasks.append(asyncio.create_task(passenger_gen.start()))
-        gen_tasks.append(asyncio.create_task(cargo_gen.start()))
-        logger.info("Payload generators enabled on this station process")
-
     # Command listener
     cmd_task = asyncio.create_task(
         _handle_commands(
-            redis_client, station, message_bus, passenger_gen, cargo_gen
+            redis_client, station, message_bus
         )
     )
 
@@ -230,13 +227,6 @@ async def run_station(args: argparse.Namespace):
     # Cleanup
     cmd_task.cancel()
     bus_task.cancel()
-    for t in gen_tasks:
-        t.cancel()
-
-    if passenger_gen:
-        await passenger_gen.stop()
-    if cargo_gen:
-        await cargo_gen.stop()
 
     await station.stop()
     await message_bus.stop_listening()
@@ -266,11 +256,6 @@ def main():
         "--network-path",
         default=None,
         help="Path to network.json (overrides AEXIS_NETWORK_DATA env var)",
-    )
-    parser.add_argument(
-        "--generators",
-        action="store_true",
-        help="Enable passenger/cargo generators on this station process",
     )
     args = parser.parse_args()
     asyncio.run(run_station(args))

@@ -54,7 +54,6 @@ class AexisLauncher:
         """Check if Redis is reachable and authenticated."""
         try:
             import redis
-            # Parse host/port from URL
             from urllib.parse import urlparse
             url = urlparse(self.redis_url)
             r = redis.Redis(
@@ -63,6 +62,8 @@ class AexisLauncher:
                 password=self.redis_password,
                 socket_connect_timeout=2
             )
+            # Flush all legacy data before starting
+            r.flushall(asynchronous=True)
             return r.ping()
         except ImportError:
             logger.warning("redis-py not installed in launcher environment, skipping ping.")
@@ -70,7 +71,6 @@ class AexisLauncher:
         except Exception as e:
             logger.error(f"Redis connectivity check failed: {e}")
             return False
-        r.flushall(asynchronous=True)
 
     def _get_python_cmd(self) -> str:
         venv_python = self.aexis_root / ".venv" / "bin" / "python"
@@ -167,8 +167,6 @@ class AexisLauncher:
                 "--redis-password", self.redis_password,
                 "--network-path", self.network_path
             ]
-            if i == 0: # Generators only on first station
-                args.append("--generators")
             self.launch_process("aexis.station.main", args, f"Station {sid}")
 
         logger.info("Waiting for stations to initialize...")

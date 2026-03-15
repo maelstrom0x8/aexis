@@ -450,7 +450,6 @@ class NetworkVisualizer {
     if (!positionData?.pod_id) {
       return;
     }
-    console.log("visualizer.handlePodPositionUpdate: received data:", positionData);
     const podId = positionData.pod_id;
     const location = positionData.location;
 
@@ -556,8 +555,10 @@ class NetworkVisualizer {
 
     // Waiting payloads at station (count-based)
     if (eventType.includes("PassengerArrival")) {
+      console.log("[Visualizer] PassengerArrival", eventData);
       this.incrementWaiting(eventData.station_id, "passenger", 1);
     } else if (eventType.includes("CargoRequest")) {
+      console.log("[Visualizer] CargoRequest", eventData);
       this.incrementWaiting(eventData.origin, "cargo", 1);
     }
 
