@@ -38,10 +38,11 @@ class AexisLauncher:
         self.shutting_down = False
 
         # Configuration (from env or defaults)
+        print(f"Loading configuration from environment...")
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         self.redis_password = os.getenv("REDIS_PASSWORD", "password")
         self.network_path = os.getenv("AEXIS_NETWORK_DATA", str(self.aexis_root / "network.json"))
-        self.pod_count = int(os.getenv("POD_COUNT", "12"))
+        self.pod_count = int(os.getenv("POD_COUNT"))
         self.cargo_ratio = int(os.getenv("CARGO_RATIO", "50"))
         self.api_port = int(os.getenv("API_PORT", "8001"))
         self.web_port = int(os.getenv("WEB_PORT", "8000"))

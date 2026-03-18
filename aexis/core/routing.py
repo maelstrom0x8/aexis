@@ -155,10 +155,17 @@ class OfflineRoutingStrategy(RoutingStrategy):
             if is_cargo_pod and req_type != "cargo":
                 continue
 
-            # For requests not yet onboard, we ONLY target the origin for pickup
             origin = req.get("origin")
+            destination = req.get("destination")
+
             if origin and origin != context.current_location:
+                # Request is at a different station — route there for pickup
                 destinations.add(origin)
+            elif origin == context.current_location and destination:
+                # Pod is already at the pickup station. Pickup will happen
+                # before departure (in _execute_decision), so route directly
+                # to the delivery destination.
+                destinations.add(destination)
 
         # Add destinations of current passengers (payload already onboard)
         if context.passengers:
@@ -224,37 +231,13 @@ class OfflineRoutingStrategy(RoutingStrategy):
         return nearest
 
     def _get_idle_route(self, current_location: str) -> dict:
-        """Get idle route (cruise to nearest station to balance distribution)"""
-        nodes = list(self.network_context.network_graph.nodes())
-        if current_location in nodes:
-            nodes.remove(current_location)
-            
-        if not nodes:
-            return {
-                "route": [current_location],
-                "duration": 0,
-                "distance": 0,
-                "confidence": 1.0,
-            }
-            
-        nearest = self._find_nearest_station(current_location, nodes)
-        try:
-            path = nx.shortest_path(self.network_context.network_graph, current_location, nearest, weight="weight")
-            distance = self.network_context.calculate_distance(current_location, nearest)
-            duration = self._estimate_travel_time(distance, {})
-            return {
-                "route": path,
-                "duration": duration,
-                "distance": distance,
-                "confidence": 0.5,
-            }
-        except (nx.NetworkXNoPath, nx.NodeNotFound):
-            return {
-                "route": [current_location, nearest],
-                "duration": 5,
-                "distance": 100,
-                "confidence": 0.5,
-            }
+        """Get idle route. Idle pods remain at their current station."""
+        return {
+            "route": [current_location],
+            "duration": 0,
+            "distance": 0,
+            "confidence": 1.0,
+        }
 
     def _estimate_travel_time(self, distance: float, network_state: dict) -> int:
         """Estimate travel time in minutes"""

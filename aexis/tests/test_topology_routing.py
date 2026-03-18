@@ -435,9 +435,10 @@ class TestIdleRouting:
     def test_multi_node_idles_to_nearest(self, network_context):
         strategy = OfflineRoutingStrategy(network_context)
         result = strategy._get_idle_route("1")
-        # Should idle-cruise to a nearby station
-        assert len(result["route"]) >= 2
+        # Should stay idle at current station
+        assert len(result["route"]) == 1
         assert result["route"][0] == "1"
+        assert result["duration"] == 0
 
     def test_single_node_stays_put(self, single_station_network):
         strategy = OfflineRoutingStrategy(single_station_network)

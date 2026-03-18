@@ -1,0 +1,88 @@
+{
+  "name": "star_hub",
+  "description": "Star topology with central hub and 4 spoke stations for hub contention testing",
+  "nodes": [
+    {
+      "id": "hub",
+      "label": "hub",
+      "coordinate": {
+        "x": 0,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "s1",
+          "weight": 100.0
+        },
+        {
+          "node_id": "s2",
+          "weight": 100.0
+        },
+        {
+          "node_id": "s3",
+          "weight": 100.0
+        },
+        {
+          "node_id": "s4",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "s1",
+      "label": "s1",
+      "coordinate": {
+        "x": 100,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "hub",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "s2",
+      "label": "s2",
+      "coordinate": {
+        "x": 0,
+        "y": 100
+      },
+      "adj": [
+        {
+          "node_id": "hub",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "s3",
+      "label": "s3",
+      "coordinate": {
+        "x": -100,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "hub",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "s4",
+      "label": "s4",
+      "coordinate": {
+        "x": 0,
+        "y": -100
+      },
+      "adj": [
+        {
+          "node_id": "hub",
+          "weight": 100.0
+        }
+      ]
+    }
+  ]
+}

@@ -1,71 +1,196 @@
-import os
-import logging
+"""Knowledge Base data management for DigitalOcean Gradient.
+
+Uploads network topology data to a DigitalOcean Spaces bucket that backs
+a Gradient Knowledge Base.  The platform indexes the uploaded files and
+makes them available for RAG when the agent processes routing decisions.
+
+The Knowledge Base and its connection to the Spaces bucket are configured
+in the DigitalOcean Control Panel.  This module only handles the data
+pipeline (upload/refresh).
+"""
+
 import json
+import logging
+import os
+
 import boto3
-from typing import List, Optional
-from .errors import ErrorCode, create_error
+from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
+
 class KnowledgeBaseManager:
-    """Manages DigitalOcean Gradient Knowledge Bases and Spaces sync"""
+    """Manages data uploads to the DigitalOcean Spaces bucket that backs
+    the Gradient Knowledge Base for RAG.
 
-    def __init__(self, gradient_client):
-        self.gradient_client = gradient_client
-        self.spaces_client = boto3.client(
-            "s3",
-            region_name=os.environ.get("DO_SPACES_REGION", "nyc3"),
-            endpoint_url=f"https://{os.environ.get('DO_SPACES_REGION', 'nyc3')}.digitaloceanspaces.com",
-            aws_access_key_id=os.environ.get("DO_SPACES_KEY"),
-            aws_secret_access_key=os.environ.get("DO_SPACES_SECRET"),
-        )
-        self.bucket_name = os.environ.get("DO_SPACES_BUCKET")
+    The platform-side KB indexes the bucket contents automatically.
+    This class handles:
+    - Serialising network topology to a structured JSON document
+    - Uploading to the Spaces bucket via the S3-compatible API
+    """
 
-    def sync_network_data(self, network_data: dict, filename: str = "network_topology.json"):
-        """Sync local network topology to DigitalOcean Spaces"""
-        try:
-            if not self.bucket_name:
-                raise create_error(
-                    ErrorCode.CONFIG_MISSING_ENV_VAR,
-                    component="KnowledgeBaseManager",
-                    context={"var_name": "DO_SPACES_BUCKET"}
-                )
+    def __init__(self):
+        region = os.environ.get("DO_SPACES_REGION", "nyc3")
+        spaces_key = os.environ.get("DO_SPACES_KEY", "")
+        spaces_secret = os.environ.get("DO_SPACES_SECRET", "")
+        self._bucket_name = os.environ.get("DO_SPACES_BUCKET", "")
 
-            logger.info(f"Syncing {filename} to Spaces bucket: {self.bucket_name}")
-            self.spaces_client.put_object(
-                Bucket=self.bucket_name,
-                Key=filename,
-                Body=json.dumps(network_data, indent=2),
-                ContentType="application/json"
+        if not spaces_key or not spaces_secret:
+            logger.warning(
+                "DO_SPACES_KEY / DO_SPACES_SECRET not set — "
+                "KnowledgeBaseManager will not be able to upload data"
             )
-            logger.info(f"Successfully synced {filename} to Spaces")
-            
-        except Exception as e:
-            logger.error(f"Failed to sync network data to Spaces: {e}")
-            raise
+            self._client = None
+            return
 
-    def trigger_kb_index(self, kb_id: str):
-        """Trigger an indexing job for a Knowledge Base attached to the Spaces bucket"""
-        try:
-            # Note: The Gradient SDK pattern involves workspace-level KB management
-            # kb = self.gradient_client.get_knowledge_base(kb_id=kb_id)
-            # await kb.trigger_indexing()
-            # For now, we simulate or use the appropriate SDK method
-            logger.info(f"Triggering re-indexing for Knowledge Base: {kb_id}")
-            # Placeholder for actual indexing trigger via Gradient ADK/SDK
-            pass
-        except Exception as e:
-            logger.error(f"Failed to trigger KB indexing: {e}")
-            raise
+        self._client = boto3.client(
+            "s3",
+            region_name=region,
+            endpoint_url=f"https://{region}.digitaloceanspaces.com",
+            aws_access_key_id=spaces_key,
+            aws_secret_access_key=spaces_secret,
+        )
 
-    def query_kb(self, kb_id: str, query: str) -> List[dict]:
-        """Query the Knowledge Base for relevant routing context"""
+    @property
+    def is_configured(self) -> bool:
+        """Whether the manager has valid Spaces credentials."""
+        return self._client is not None and bool(self._bucket_name)
+
+    def upload_network_topology(
+        self,
+        network_data: dict,
+        filename: str = "aexis_network_topology.json",
+    ) -> bool:
+        """Serialize and upload network topology to the Spaces bucket.
+
+        The Knowledge Base will re-index this file on its next sync cycle.
+
+        Args:
+            network_data: Raw network dict (stations, edges, coordinates).
+            filename: Object key in the Spaces bucket.
+
+        Returns:
+            True if upload succeeded, False otherwise.
+        """
+        if not self.is_configured:
+            logger.error(
+                "Cannot upload network topology: Spaces credentials or bucket not configured"
+            )
+            return False
+
+        topology_doc = self._build_topology_document(network_data)
+
         try:
-            # kb = self.gradient_client.get_knowledge_base(kb_id=kb_id)
-            # results = await kb.query(query=query)
-            # return results
-            logger.info(f"Querying KB {kb_id}: {query}")
-            return []
-        except Exception as e:
-            logger.error(f"KB query failed: {e}")
-            return []
+            self._client.put_object(
+                Bucket=self._bucket_name,
+                Key=filename,
+                Body=json.dumps(topology_doc, indent=2),
+                ContentType="application/json",
+            )
+            logger.info(
+                "Uploaded network topology (%d stations, %d edges) to "
+                "Spaces bucket '%s' as '%s'",
+                len(topology_doc.get("stations", [])),
+                len(topology_doc.get("edges", [])),
+                self._bucket_name,
+                filename,
+            )
+            return True
+
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("Failed to upload network topology to Spaces: %s", exc)
+            return False
+
+    def upload_station_metadata(
+        self,
+        station_data: list[dict],
+        filename: str = "aexis_station_metadata.json",
+    ) -> bool:
+        """Upload enriched station metadata for RAG context.
+
+        Args:
+            station_data: List of station dicts with capacities, queues, etc.
+            filename: Object key in the Spaces bucket.
+
+        Returns:
+            True if upload succeeded, False otherwise.
+        """
+        if not self.is_configured:
+            logger.error("Cannot upload station metadata: not configured")
+            return False
+
+        try:
+            self._client.put_object(
+                Bucket=self._bucket_name,
+                Key=filename,
+                Body=json.dumps(station_data, indent=2),
+                ContentType="application/json",
+            )
+            logger.info(
+                "Uploaded station metadata (%d stations) to Spaces '%s'",
+                len(station_data), self._bucket_name,
+            )
+            return True
+
+        except (BotoCoreError, ClientError) as exc:
+            logger.error("Failed to upload station metadata to Spaces: %s", exc)
+            return False
+
+    # -- internal -----------------------------------------------------------
+
+    @staticmethod
+    def _build_topology_document(network_data: dict) -> dict:
+        """Transform raw network data into a structured document
+        optimized for RAG retrieval.
+
+        The document uses natural language descriptions alongside the raw
+        data so the LLM can reason about the topology effectively.
+        """
+        stations = []
+        edges = []
+
+        nodes = network_data.get("nodes", [])
+        for node in nodes:
+            station_id = node.get("id", "")
+            station_entry = {
+                "station_id": station_id,
+                "name": node.get("name", station_id),
+                "position": node.get("position", {}),
+                "capacity": node.get("capacity", {}),
+                "description": (
+                    f"Station {station_id} is located at position "
+                    f"({node.get('position', {}).get('x', 0)}, "
+                    f"{node.get('position', {}).get('y', 0)}). "
+                    f"It has {node.get('capacity', {}).get('loading_bays', 'unknown')} "
+                    f"loading bays."
+                ),
+            }
+            stations.append(station_entry)
+
+        raw_edges = network_data.get("edges", [])
+        for edge in raw_edges:
+            edge_entry = {
+                "from": edge.get("from", ""),
+                "to": edge.get("to", ""),
+                "weight": edge.get("weight", 1.0),
+                "description": (
+                    f"Edge from station {edge.get('from', '?')} to "
+                    f"station {edge.get('to', '?')} with distance/weight "
+                    f"{edge.get('weight', 1.0)}."
+                ),
+            }
+            edges.append(edge_entry)
+
+        return {
+            "document_type": "aexis_network_topology",
+            "version": "1.0",
+            "total_stations": len(stations),
+            "total_edges": len(edges),
+            "stations": stations,
+            "edges": edges,
+            "summary": (
+                f"AEXIS transit network with {len(stations)} stations and "
+                f"{len(edges)} connections. Pods navigate between stations "
+                f"to pick up and deliver passengers and cargo."
+            ),
+        }

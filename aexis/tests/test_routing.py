@@ -72,9 +72,9 @@ class TestOfflineRouter:
         )
 
         route = await router.route(context)
-        assert isinstance(route, Route)
-        # With no requests, should pick a nearby station to idle-cruise to
-        assert len(route.stations) >= 2
+        # With no requests, pod should remain idle at current station
+        assert len(route.stations) == 1
+        assert route.stations[0] == "1"
 
     async def test_route_with_passengers_onboard(
         self, network_context_for_routing
@@ -168,4 +168,5 @@ class TestRoutingProvider:
 
         route = await provider.route(context)
         assert isinstance(route, Route)
-        assert len(route.stations) >= 2
+        assert len(route.stations) == 1
+        assert route.stations[0] == "1"

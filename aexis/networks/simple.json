@@ -1,0 +1,94 @@
+{
+  "name": "simple_gungir",
+  "description": "Simple 4-station fully-meshed topology for basic integration testing",
+  "nodes": [
+    {
+      "id": "1",
+      "label": "1",
+      "coordinate": {
+        "x": -20,
+        "y": 80
+      },
+      "adj": [
+        {
+          "node_id": "2",
+          "weight": 100.0
+        },
+        {
+          "node_id": "3",
+          "weight": 100.0
+        },
+        {
+          "node_id": "4",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "label": "2",
+      "coordinate": {
+        "x": 0,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 100.0
+        },
+        {
+          "node_id": "3",
+          "weight": 100.0
+        },
+        {
+          "node_id": "4",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "label": "3",
+      "coordinate": {
+        "x": 80,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 100.0
+        },
+        {
+          "node_id": "2",
+          "weight": 100.0
+        },
+        {
+          "node_id": "4",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "label": "4",
+      "coordinate": {
+        "x": -46,
+        "y": -35
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 100.0
+        },
+        {
+          "node_id": "2",
+          "weight": 100.0
+        },
+        {
+          "node_id": "3",
+          "weight": 100.0
+        }
+      ]
+    }
+  ]
+}

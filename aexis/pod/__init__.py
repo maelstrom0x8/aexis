@@ -26,6 +26,7 @@ from aexis.core.model import (
     Decision,
     DecisionContext,
     LocationDescriptor,
+    PassengerArrival,
     PassengerDelivered,
     PassengerPickedUp,
     PodArrival,
@@ -330,9 +331,6 @@ class Pod:
 
         return True
 
-    # ------------------------------------------------------------------
-    # Movement physics
-    # ------------------------------------------------------------------
 
     async def update(self, dt: float) -> bool:
         """Advance pod physics for a single time step."""
@@ -398,10 +396,14 @@ class Pod:
             coordinate=Coordinate(pos[0], pos[1]),
         )
         await self._publish_position_update()
-        await self._handle_station_arrival(final_station)
-
+        
+        # Clear current_route BEFORE arrival handler, so if the handler
+        # triggers a new decision, the new route isn't immediately destroyed.
         self.current_route = None
         self.segment_progress = 0.0
+        
+        await self._handle_station_arrival(final_station)
+
         await self._publish_status_update()
         await self._publish_state_snapshot()
         logger.info(f"Pod {self.pod_id} arrived at {final_station}")
@@ -410,9 +412,6 @@ class Pod:
         """Override in subclasses for pickup/delivery."""
         pass
 
-    # ------------------------------------------------------------------
-    # Decision making
-    # ------------------------------------------------------------------
 
     async def make_decision(self):
         try:
@@ -446,18 +445,24 @@ class Pod:
     async def _execute_decision(self, decision: Decision):
         if not decision:
             return
-        self.current_route = Route(
-            route_id=f"rt_{datetime.now().timestamp()}",
-            stations=decision.route,
-            estimated_duration=decision.estimated_duration,
-        )
+            
         await self._hydrate_route(decision.route)
 
         if self.current_segment or self.route_queue:
+            self.current_route = Route(
+                route_id=f"rt_{datetime.now().timestamp()}",
+                stations=decision.route,
+                estimated_duration=decision.estimated_duration,
+            )
             self.status = PodStatus.EN_ROUTE
             self.movement_start_time = datetime.now(UTC)
         else:
+            self.current_route = None
             self.status = PodStatus.IDLE
+
+        # Publish state immediately so the snapshot reflects EN_ROUTE/IDLE
+        # before any pickup/delivery logic changes it to LOADING/UNLOADING.
+        await self._publish_state_snapshot()
 
         await self._setup_pickup_delivery_routes(decision.route)
 
@@ -587,12 +592,6 @@ class Pod:
             ),
         }
 
-
-# ======================================================================
-# PassengerPod
-# ======================================================================
-
-
 class PassengerPod(Pod):
     """Pod specialised for passenger transport."""
 
@@ -611,6 +610,8 @@ class PassengerPod(Pod):
         self.passengers: list[dict] = []
         self.pickup_route: list[str] = []
         self.delivery_route: list[str] = []
+        self._decision_pending: bool = False
+        self._decision_task: asyncio.Task | None = None
 
     def _get_pod_type(self) -> PodType:
         return PodType.PASSENGER
@@ -677,17 +678,32 @@ class PassengerPod(Pod):
             if not eligible:
                 return
 
-            # Proximity-Based Claiming Delay
-            # Give docked pods a head-start to prevent "thundering herd" races
-            # from distant pods winning claims incorrectly.
+            # Distance-proportional claiming delay.
+            # Closer pods claim first; distant pods find the claim already taken.
+            # Docked pods (distance=0) claim immediately.
             at_station = (
                 self.location_descriptor.location_type == "station" and
                 self.location_descriptor.node_id == origin
             )
             if not at_station:
-                # 200ms delay for remote pods
-                logger.debug(f"Pod {self.pod_id} (remote) delaying claim for {passenger_id} at {origin}")
-                await asyncio.sleep(0.2)
+                from aexis.core.network import NetworkContext
+                try:
+                    nc = NetworkContext.get_instance()
+                    current_station = (
+                        self.location_descriptor.node_id
+                        if self.location_descriptor.location_type == "station"
+                        else (self.current_segment.end_node if self.current_segment else origin)
+                    )
+                    distance = nc.calculate_distance(current_station, origin)
+                except Exception:
+                    distance = 100.0  # fallback to a moderate delay
+                # Scale: ~0.2s per 100 distance units, minimum 50ms
+                delay = max(0.05, distance / 500.0)
+                logger.debug(
+                    f"Pod {self.pod_id} (remote, dist={distance:.0f}) "
+                    f"delaying claim for {passenger_id} at {origin} by {delay:.3f}s"
+                )
+                await asyncio.sleep(delay)
 
             # Atomic claim via Redis
             if not await self.station_client.claim_passenger(
@@ -699,10 +715,36 @@ class PassengerPod(Pod):
                 f"Pod {self.pod_id}: claimed passenger {passenger_id} at {origin}"
             )
             self._available_requests.append(request)
-            await self.make_decision()
+            # Debounce: schedule a single deferred decision instead of re-planning
+            # on every individual claim. Multiple claims within the window are
+            # batched into one make_decision() call.
+            self._schedule_deferred_decision()
         except Exception as e:
             logger.error(
                 f"Pod {self.pod_id}: broadcast error: {e}", exc_info=True
+            )
+
+    def _schedule_deferred_decision(self):
+        """Schedule a single make_decision() call after a 300ms debounce window.
+        Multiple claims arriving within the window are batched into one decision."""
+        if self._decision_pending:
+            return  # already scheduled, new claims will be picked up
+        self._decision_pending = True
+        self._decision_task = asyncio.ensure_future(self._deferred_decision())
+
+    async def _deferred_decision(self):
+        """Wait for the debounce window, then execute a single make_decision()."""
+        try:
+            await asyncio.sleep(0.3)  # 300ms batching window
+            self._decision_pending = False
+            await self.make_decision()
+        except asyncio.CancelledError:
+            self._decision_pending = False
+        except Exception as e:
+            self._decision_pending = False
+            logger.error(
+                f"Pod {self.pod_id}: deferred decision error: {e}",
+                exc_info=True,
             )
 
     async def _handle_station_arrival(self, station_id: str):
@@ -736,6 +778,11 @@ class PassengerPod(Pod):
             if any(e.get("passenger_id") == pid for e in self.passengers):
                 continue
             pickups.append(p)
+            self._available_requests = [
+                r
+                for r in self._available_requests
+                if r.get("passenger_id") != pid
+            ]
 
         # 2. Opportunistically claim unclaimed passengers
         extra_capacity = remaining - len(pickups)
@@ -779,6 +826,37 @@ class PassengerPod(Pod):
             await self._publish_event(event)
 
         self.status = PodStatus.EN_ROUTE
+
+        # Re-broadcast unclaimed passengers left at the station so other pods
+        # in the fleet can discover and claim them. Without this, overflow
+        # passengers are silently stranded when a pod fills to capacity.
+        await self._rebroadcast_unclaimed_passengers(station_id)
+
+    async def _rebroadcast_unclaimed_passengers(self, station_id: str):
+        """Check for unclaimed passengers remaining at station_id and re-publish
+        PassengerArrival events for each one. This handles the case where a pod
+        fills to capacity and leaves overflow passengers with no active broadcast
+        to trigger other pods."""
+        try:
+            remaining = await self.station_client.get_pending_passengers(station_id)
+            if not remaining:
+                return
+            logger.info(
+                f"Pod {self.pod_id}: re-broadcasting {len(remaining)} unclaimed "
+                f"passengers at station {station_id}"
+            )
+            for p in remaining:
+                event = PassengerArrival(
+                    passenger_id=p.get("passenger_id", ""),
+                    station_id=station_id,
+                    destination=p.get("destination", ""),
+                )
+                await self._publish_event(event)
+        except Exception as e:
+            logger.error(
+                f"Pod {self.pod_id}: rebroadcast error at {station_id}: {e}",
+                exc_info=True,
+            )
 
     async def _execute_delivery(self, station_id: str):
         delivered = [
@@ -832,6 +910,45 @@ class PassengerPod(Pod):
             current_location = network.get_nearest_station(
                 self.location_descriptor.coordinate
             )
+
+        # Rebuild available requests from ground truth (Redis) each cycle.
+        # This prevents stale demand from accumulating in _available_requests
+        # and causing phantom routing after all passengers are delivered.
+        self._available_requests.clear()
+        onboard_ids = {p.get("passenger_id") for p in self.passengers}
+        try:
+            station_ids = await self.station_client.get_all_station_ids()
+            for sid in station_ids:
+                # 1. Truly unclaimed passengers — available for any pod to grab
+                pending = await self.station_client.get_pending_passengers(sid)
+                for p in pending:
+                    self._available_requests.append({
+                        "type": "passenger",
+                        "passenger_id": p.get("passenger_id", ""),
+                        "origin": sid,
+                        "destination": p.get("destination", ""),
+                        "priority": p.get("priority", 1),
+                    })
+
+                # 2. Passengers claimed by THIS pod but not yet onboard.
+                #    These need to stay in available_requests so the routing
+                #    provider directs the pod toward their pickup station.
+                claimed = await self.station_client.get_claimed_passengers(
+                    sid, self.pod_id
+                )
+                for p in claimed:
+                    pid = p.get("passenger_id", "")
+                    if pid not in onboard_ids:
+                        self._available_requests.append({
+                            "type": "passenger",
+                            "passenger_id": pid,
+                            "origin": sid,
+                            "destination": p.get("destination", ""),
+                            "priority": p.get("priority", 1),
+                        })
+        except Exception as e:
+            logger.error(f"Pod {self.pod_id} failed to fetch global demand: {e}")
+
         return DecisionContext(
             pod_id=self.pod_id,
             current_location=current_location,
@@ -855,11 +972,6 @@ class PassengerPod(Pod):
         state = super().get_state()
         state["passengers"] = self.passengers
         return state
-
-
-# ======================================================================
-# CargoPod
-# ======================================================================
 
 
 class CargoPod(Pod):
@@ -946,15 +1058,23 @@ class CargoPod(Pod):
             if not eligible:
                 return
 
-            # Proximity-Based Claiming Delay
+            # Proximity-Based Claiming Delay (Bug #1 Fix for Cargo)
             at_station = (
                 self.location_descriptor.location_type == "station" and
                 self.location_descriptor.node_id == origin
             )
             if not at_station:
-                # 200ms delay for remote pods
-                logger.debug(f"Pod {self.pod_id} (remote) delaying claim for {request_id} at {origin}")
-                await asyncio.sleep(0.2)
+                from aexis.core.network import NetworkContext
+                network = NetworkContext.get_instance()
+                distance = network.calculate_distance(
+                    self.location_descriptor.node_id, origin
+                )
+                delay_seconds = max(0.05, distance / 500.0)
+                logger.debug(
+                    f"Pod {self.pod_id} (remote, dist={distance:.0f}) delaying "
+                    f"claim for cargo {request_id} at {origin} by {delay_seconds:.3f}s"
+                )
+                await asyncio.sleep(delay_seconds)
 
             if not await self.station_client.claim_cargo(
                 origin, request_id, self.pod_id
@@ -965,11 +1085,32 @@ class CargoPod(Pod):
                 f"Pod {self.pod_id}: claimed cargo {request_id} at {origin}"
             )
             self._available_requests.append(request)
-            await self.make_decision()
+            # Bug #3 Fix: Use debounce instead of immediate decision
+            self._schedule_deferred_decision()
         except Exception as e:
             logger.error(
                 f"Pod {self.pod_id}: broadcast error: {e}", exc_info=True
             )
+
+    def _schedule_deferred_decision(self):
+        """Schedule a single make_decision call to batch rapidly incoming claims."""
+        if not getattr(self, "_decision_pending", False):
+            self._decision_pending = True
+            
+            # Cancel any existing task just in case
+            if hasattr(self, "_decision_task") and self._decision_task and not self._decision_task.done():
+                self._decision_task.cancel()
+                
+            self._decision_task = asyncio.create_task(self._deferred_decision())
+
+    async def _deferred_decision(self):
+        """Wait out the debounce window, then compute the route once."""
+        try:
+            await asyncio.sleep(0.3)  # 300ms debounce window
+            self._decision_pending = False
+            await self.make_decision()
+        except asyncio.CancelledError:
+            self._decision_pending = False
 
     async def _handle_station_arrival(self, station_id: str):
         if self._arrival_lock.locked():
@@ -1024,6 +1165,9 @@ class CargoPod(Pod):
                 load_time=cargo_item["pickup_time"],
             )
             await self._publish_event(event)
+            self._available_requests = [
+                r for r in self._available_requests if r.get("request_id") != req_id
+            ]
 
         # 2. Opportunistically load unclaimed cargo
         pending = await self.station_client.get_pending_cargo(station_id)
@@ -1118,6 +1262,44 @@ class CargoPod(Pod):
             current_location = network.get_nearest_station(
                 self.location_descriptor.coordinate
             )
+
+        # Bug #2 Fix: Clear stale requests to prevent phantom oscillation
+        self._available_requests.clear()
+        
+        onboard_ids = {c.get("request_id") for c in self.cargo}
+        try:
+            station_ids = await self.station_client.get_all_station_ids()
+            for sid in station_ids:
+                # 1. Truly unclaimed cargo
+                pending = await self.station_client.get_pending_cargo(sid)
+                for c in pending:
+                    self._available_requests.append({
+                        "type": "cargo",
+                        "request_id": c.get("request_id", ""),
+                        "origin": sid,
+                        "destination": c.get("destination", ""),
+                        "weight": c.get("weight", 0.0),
+                        "priority": c.get("priority", 1),
+                    })
+                    
+                # 2. Cargo claimed by THIS pod but not yet onboard
+                claimed = await self.station_client.get_claimed_cargo(
+                    sid, self.pod_id
+                )
+                for c in claimed:
+                    rid = c.get("request_id", "")
+                    if rid not in onboard_ids:
+                        self._available_requests.append({
+                            "type": "cargo",
+                            "request_id": rid,
+                            "origin": sid,
+                            "destination": c.get("destination", ""),
+                            "weight": c.get("weight", 0.0),
+                            "priority": c.get("priority", 1),
+                        })
+        except Exception as e:
+            logger.error(f"Pod {self.pod_id} failed to fetch global cargo demand: {e}")
+
         return DecisionContext(
             pod_id=self.pod_id,
             current_location=current_location,

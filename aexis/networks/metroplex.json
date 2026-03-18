@@ -1,0 +1,704 @@
+{
+  "name": "metroplex",
+  "description": "31-station complex mesh with 4 regional clusters (hub, north, east, west, south) and strategic inter-cluster connections",
+  "nodes": [
+    {
+      "id": "1",
+      "label": "1",
+      "coordinate": {
+        "x": 0,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "2",
+          "weight": 80.0
+        },
+        {
+          "node_id": "3",
+          "weight": 70.7
+        },
+        {
+          "node_id": "4",
+          "weight": 80.0
+        },
+        {
+          "node_id": "5",
+          "weight": 80.0
+        },
+        {
+          "node_id": "27",
+          "weight": 300.0
+        },
+        {
+          "node_id": "5",
+          "weight": 80.0
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "label": "2",
+      "coordinate": {
+        "x": 80,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 80.0
+        },
+        {
+          "node_id": "3",
+          "weight": 70.7
+        },
+        {
+          "node_id": "4",
+          "weight": 70.7
+        },
+        {
+          "node_id": "5",
+          "weight": 80.0
+        },
+        {
+          "node_id": "6",
+          "weight": 350.0
+        },
+        {
+          "node_id": "9",
+          "weight": 350.0
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "label": "3",
+      "coordinate": {
+        "x": 40,
+        "y": 70
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 70.7
+        },
+        {
+          "node_id": "2",
+          "weight": 70.7
+        },
+        {
+          "node_id": "4",
+          "weight": 70.7
+        },
+        {
+          "node_id": "5",
+          "weight": 70.7
+        },
+        {
+          "node_id": "13",
+          "weight": 380.0
+        },
+        {
+          "node_id": "14",
+          "weight": 400.0
+        }
+      ]
+    },
+    {
+      "id": "4",
+      "label": "4",
+      "coordinate": {
+        "x": -40,
+        "y": 70
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 80.0
+        },
+        {
+          "node_id": "2",
+          "weight": 70.7
+        },
+        {
+          "node_id": "3",
+          "weight": 70.7
+        },
+        {
+          "node_id": "5",
+          "weight": 80.0
+        },
+        {
+          "node_id": "20",
+          "weight": 380.0
+        },
+        {
+          "node_id": "22",
+          "weight": 400.0
+        }
+      ]
+    },
+    {
+      "id": "5",
+      "label": "5",
+      "coordinate": {
+        "x": -80,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 80.0
+        },
+        {
+          "node_id": "2",
+          "weight": 80.0
+        },
+        {
+          "node_id": "3",
+          "weight": 70.7
+        },
+        {
+          "node_id": "4",
+          "weight": 80.0
+        },
+        {
+          "node_id": "20",
+          "weight": 380.0
+        },
+        {
+          "node_id": "27",
+          "weight": 300.0
+        }
+      ]
+    },
+    {
+      "id": "6",
+      "label": "6",
+      "coordinate": {
+        "x": 431.6,
+        "y": 150.0
+      },
+      "adj": [
+        {
+          "node_id": "7",
+          "weight": 150.0
+        },
+        {
+          "node_id": "12",
+          "weight": 150.0
+        },
+        {
+          "node_id": "2",
+          "weight": 350.0
+        }
+      ]
+    },
+    {
+      "id": "7",
+      "label": "7",
+      "coordinate": {
+        "x": 550.0,
+        "y": 150.0
+      },
+      "adj": [
+        {
+          "node_id": "6",
+          "weight": 150.0
+        },
+        {
+          "node_id": "8",
+          "weight": 150.0
+        },
+        {
+          "node_id": "2",
+          "weight": 370.0
+        }
+      ]
+    },
+    {
+      "id": "8",
+      "label": "8",
+      "coordinate": {
+        "x": 349.0,
+        "y": 260.0
+      },
+      "adj": [
+        {
+          "node_id": "7",
+          "weight": 150.0
+        },
+        {
+          "node_id": "9",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "9",
+      "label": "9",
+      "coordinate": {
+        "x": 249.5,
+        "y": 258.0
+      },
+      "adj": [
+        {
+          "node_id": "8",
+          "weight": 150.0
+        },
+        {
+          "node_id": "10",
+          "weight": 150.0
+        },
+        {
+          "node_id": "2",
+          "weight": 350.0
+        }
+      ]
+    },
+    {
+      "id": "10",
+      "label": "10",
+      "coordinate": {
+        "x": 249.5,
+        "y": 108.0
+      },
+      "adj": [
+        {
+          "node_id": "9",
+          "weight": 150.0
+        },
+        {
+          "node_id": "11",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "11",
+      "label": "11",
+      "coordinate": {
+        "x": 249.5,
+        "y": -42.0
+      },
+      "adj": [
+        {
+          "node_id": "10",
+          "weight": 150.0
+        },
+        {
+          "node_id": "12",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "12",
+      "label": "12",
+      "coordinate": {
+        "x": 349.0,
+        "y": -40.0
+      },
+      "adj": [
+        {
+          "node_id": "6",
+          "weight": 150.0
+        },
+        {
+          "node_id": "11",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "13",
+      "label": "13",
+      "coordinate": {
+        "x": 500,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "14",
+          "weight": 120.0
+        },
+        {
+          "node_id": "15",
+          "weight": 120.0
+        },
+        {
+          "node_id": "3",
+          "weight": 380.0
+        },
+        {
+          "node_id": "4",
+          "weight": 400.0
+        }
+      ]
+    },
+    {
+      "id": "14",
+      "label": "14",
+      "coordinate": {
+        "x": 500,
+        "y": 120
+      },
+      "adj": [
+        {
+          "node_id": "13",
+          "weight": 120.0
+        },
+        {
+          "node_id": "16",
+          "weight": 100.0
+        },
+        {
+          "node_id": "17",
+          "weight": 100.0
+        },
+        {
+          "node_id": "18",
+          "weight": 100.0
+        },
+        {
+          "node_id": "19",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "15",
+      "label": "15",
+      "coordinate": {
+        "x": 500,
+        "y": -120
+      },
+      "adj": [
+        {
+          "node_id": "13",
+          "weight": 120.0
+        },
+        {
+          "node_id": "16",
+          "weight": 100.0
+        },
+        {
+          "node_id": "17",
+          "weight": 100.0
+        },
+        {
+          "node_id": "18",
+          "weight": 100.0
+        },
+        {
+          "node_id": "19",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "16",
+      "label": "16",
+      "coordinate": {
+        "x": 620,
+        "y": 100
+      },
+      "adj": [
+        {
+          "node_id": "14",
+          "weight": 100.0
+        },
+        {
+          "node_id": "15",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "17",
+      "label": "17",
+      "coordinate": {
+        "x": 620,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "14",
+          "weight": 100.0
+        },
+        {
+          "node_id": "15",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "18",
+      "label": "18",
+      "coordinate": {
+        "x": 620,
+        "y": -100
+      },
+      "adj": [
+        {
+          "node_id": "14",
+          "weight": 100.0
+        },
+        {
+          "node_id": "15",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "19",
+      "label": "19",
+      "coordinate": {
+        "x": 620,
+        "y": 60
+      },
+      "adj": [
+        {
+          "node_id": "14",
+          "weight": 100.0
+        },
+        {
+          "node_id": "15",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "20",
+      "label": "20",
+      "coordinate": {
+        "x": -431.6,
+        "y": 150.0
+      },
+      "adj": [
+        {
+          "node_id": "21",
+          "weight": 150.0
+        },
+        {
+          "node_id": "26",
+          "weight": 150.0
+        },
+        {
+          "node_id": "4",
+          "weight": 380.0
+        },
+        {
+          "node_id": "5",
+          "weight": 380.0
+        }
+      ]
+    },
+    {
+      "id": "21",
+      "label": "21",
+      "coordinate": {
+        "x": -550.0,
+        "y": 150.0
+      },
+      "adj": [
+        {
+          "node_id": "20",
+          "weight": 150.0
+        },
+        {
+          "node_id": "22",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "22",
+      "label": "22",
+      "coordinate": {
+        "x": -349.0,
+        "y": 260.0
+      },
+      "adj": [
+        {
+          "node_id": "21",
+          "weight": 150.0
+        },
+        {
+          "node_id": "23",
+          "weight": 150.0
+        },
+        {
+          "node_id": "4",
+          "weight": 400.0
+        }
+      ]
+    },
+    {
+      "id": "23",
+      "label": "23",
+      "coordinate": {
+        "x": -249.5,
+        "y": 258.0
+      },
+      "adj": [
+        {
+          "node_id": "22",
+          "weight": 150.0
+        },
+        {
+          "node_id": "24",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "24",
+      "label": "24",
+      "coordinate": {
+        "x": -249.5,
+        "y": 108.0
+      },
+      "adj": [
+        {
+          "node_id": "23",
+          "weight": 150.0
+        },
+        {
+          "node_id": "25",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "25",
+      "label": "25",
+      "coordinate": {
+        "x": -249.5,
+        "y": -42.0
+      },
+      "adj": [
+        {
+          "node_id": "24",
+          "weight": 150.0
+        },
+        {
+          "node_id": "26",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "26",
+      "label": "26",
+      "coordinate": {
+        "x": -349.0,
+        "y": -40.0
+      },
+      "adj": [
+        {
+          "node_id": "20",
+          "weight": 150.0
+        },
+        {
+          "node_id": "25",
+          "weight": 150.0
+        },
+        {
+          "node_id": "5",
+          "weight": 380.0
+        }
+      ]
+    },
+    {
+      "id": "27",
+      "label": "27",
+      "coordinate": {
+        "x": 0,
+        "y": -300
+      },
+      "adj": [
+        {
+          "node_id": "28",
+          "weight": 150.0
+        },
+        {
+          "node_id": "29",
+          "weight": 150.0
+        },
+        {
+          "node_id": "30",
+          "weight": 150.0
+        },
+        {
+          "node_id": "31",
+          "weight": 150.0
+        },
+        {
+          "node_id": "1",
+          "weight": 300.0
+        },
+        {
+          "node_id": "5",
+          "weight": 300.0
+        }
+      ]
+    },
+    {
+      "id": "28",
+      "label": "28",
+      "coordinate": {
+        "x": 0,
+        "y": -450
+      },
+      "adj": [
+        {
+          "node_id": "27",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "29",
+      "label": "29",
+      "coordinate": {
+        "x": 120,
+        "y": -350
+      },
+      "adj": [
+        {
+          "node_id": "27",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "30",
+      "label": "30",
+      "coordinate": {
+        "x": 120,
+        "y": -250
+      },
+      "adj": [
+        {
+          "node_id": "27",
+          "weight": 150.0
+        }
+      ]
+    },
+    {
+      "id": "31",
+      "label": "31",
+      "coordinate": {
+        "x": -120,
+        "y": -250
+      },
+      "adj": [
+        {
+          "node_id": "27",
+          "weight": 150.0
+        }
+      ]
+    }
+  ]
+}

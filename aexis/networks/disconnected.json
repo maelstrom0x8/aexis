@@ -1,0 +1,62 @@
+{
+  "name": "disconnected_clusters",
+  "description": "Two isolated 2-station clusters for testing unreachable destination handling",
+  "nodes": [
+    {
+      "id": "a1",
+      "label": "a1",
+      "coordinate": {
+        "x": 0,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "a2",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "a2",
+      "label": "a2",
+      "coordinate": {
+        "x": 100,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "a1",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "b1",
+      "label": "b1",
+      "coordinate": {
+        "x": 500,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "b2",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "b2",
+      "label": "b2",
+      "coordinate": {
+        "x": 600,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "b1",
+          "weight": 100.0
+        }
+      ]
+    }
+  ]
+}

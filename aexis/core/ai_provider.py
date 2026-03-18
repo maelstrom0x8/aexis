@@ -1,10 +1,38 @@
+"""AI provider abstraction layer.
+
+GradientAIProvider calls a managed DigitalOcean Gradient Agent endpoint,
+which has Knowledge Bases (RAG) and Guardrails attached on the platform side.
+The agent endpoint is OpenAI-compatible: POST $AGENT_ENDPOINT/api/v1/chat/completions
+
+MockAIProvider is a deterministic stub for tests and offline development.
+"""
+
+import asyncio
+import json
 import logging
+import os
+import random
 from abc import ABC, abstractmethod
 
-from .errors import ErrorCode, create_error
+import httpx
+
+from .errors import ErrorCode, GradientException, create_error
 from .model import Decision, DecisionContext
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Decision JSON schema reference (baked into the agent instructions on the
+# platform; repeated here for client-side validation only)
+# ---------------------------------------------------------------------------
+_DECISION_SCHEMA_FIELDS = {
+    "accepted_requests": list,
+    "rejected_requests": list,
+    "route": list,
+    "estimated_duration": (int, float),
+    "confidence": (int, float),
+    "reasoning": str,
+}
 
 
 class AIProvider(ABC):
@@ -27,189 +55,359 @@ class AIProvider(ABC):
 
 
 class GradientAIProvider(AIProvider):
-    """DigitalOcean Gradient™ AI provider implementation"""
+    """DigitalOcean Gradient™ Managed Agent provider.
 
-    def __init__(self, client, workspace_id: str, model_slug: str = "llama-3-8b-instruct"):
-        self.client = client
-        self.workspace_id = workspace_id
-        self.model_slug = model_slug
+    Calls the agent endpoint which internally uses:
+    - A foundation model (configured on the platform)
+    - Knowledge Bases for RAG (network topology)
+    - Guardrails for content safety and schema enforcement
+
+    The agent instructions define the routing persona and JSON output schema.
+    This provider sends only the dynamic DecisionContext per request.
+    """
+
+    _MAX_RETRIES = 3
+    _BASE_DELAY_SECONDS = 1.0
+    _REQUEST_TIMEOUT_SECONDS = 30.0
+
+    def __init__(
+        self,
+        agent_endpoint: str,
+        agent_access_key: str,
+    ):
+        if not agent_endpoint:
+            raise create_error(
+                ErrorCode.CONFIG_MISSING_ENV_VAR,
+                component="GradientAIProvider",
+                context={"var_name": "GRADIENT_AGENT_ENDPOINT"},
+            )
+        if not agent_access_key:
+            raise create_error(
+                ErrorCode.CONFIG_MISSING_ENV_VAR,
+                component="GradientAIProvider",
+                context={"var_name": "GRADIENT_AGENT_ACCESS_KEY"},
+            )
+
+        # Normalize endpoint: strip trailing slash, ensure /api/v1 path
+        self._base_url = agent_endpoint.rstrip("/")
+        if not self._base_url.endswith("/api/v1"):
+            self._base_url = f"{self._base_url}/api/v1"
+
+        self._access_key = agent_access_key
+        self._client = httpx.AsyncClient(
+            base_url=self._base_url,
+            headers={
+                "Authorization": f"Bearer {self._access_key}",
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(self._REQUEST_TIMEOUT_SECONDS, connect=10.0),
+        )
         self.call_count = 0
 
+    # -- Public interface ---------------------------------------------------
+
     async def make_decision(self, context: DecisionContext) -> Decision:
-        """Make decision using DigitalOcean Gradient™"""
-        try:
-            if not self.is_available():
-                raise create_error(
-                    ErrorCode.AI_PROVIDER_NOT_AVAILABLE,
-                    component="GradientAIProvider",
-                    context={"pod_id": context.pod_id},
-                )
+        """Send DecisionContext to the Gradient Agent and parse the response."""
+        if not self.is_available():
+            raise create_error(
+                ErrorCode.AI_PROVIDER_LIMIT_REACHED,
+                component="GradientAIProvider",
+                context={"pod_id": context.pod_id},
+            )
 
-            prompt = self._build_prompt(context)
-            
-            # Using Gradient Serverless Inference
-            # In a full-stack implementation, this would call a Gradient Agent
-            # but for a direct swap, we use the inference API.
-            response = await self._call_gradient(prompt)
-            decision = self._parse_response(response, context)
+        prompt = self._build_prompt(context)
+        raw_response = await self._call_agent(prompt, context.pod_id)
+        decision = self._parse_response(raw_response, context)
 
-            self.call_count += 1
-            return decision
-
-        except Exception as e:
-            logger.error(f"Gradient AI decision failed: {e}", exc_info=True)
-            raise
+        self.call_count += 1
+        return decision
 
     def is_available(self) -> bool:
-        """Check if Gradient is available"""
-        return self.client is not None and self.workspace_id is not None
-
-    def get_provider_name(self) -> str:
-        return f"DigitalOcean Gradient ({self.model_slug})"
-
-    async def _call_gradient(self, prompt: str):
-        """Call Gradient API with exponential backoff retry logic"""
-        import asyncio
-        import random
-        
-        max_retries = 3
-        base_delay = 1.0
-        
-        for attempt in range(max_retries):
-            try:
-                model = self.client.get_base_model(base_model_slug=self.model_slug)
-                full_prompt = f"{self._get_system_instruction()}\n\n{prompt}"
-                
-                response = await asyncio.to_thread(
-                    model.complete,
-                    query=full_prompt,
-                    max_generated_token_count=1024,
-                    temperature=0.2
-                )
-                return response
-            except Exception as e:
-                if attempt == max_retries - 1:
-                    logger.error(f"Gradient API call failed after {max_retries} attempts: {e}")
-                    raise
-                
-                delay = base_delay * (2 ** attempt) + random.uniform(0, 0.1)
-                logger.warning(f"Gradient API attempt {attempt + 1} failed: {e}. Retrying in {delay:.2f}s...")
-                await asyncio.sleep(delay)
+        """Provider is available if we have a configured client."""
+        return self._client is not None
 
     async def close(self):
-        """Gradient client cleanup (if applicable)"""
-        # The current Gradient client is stateless/sync-wrapper 
-        # but we provide the hook for future SDK updates
-        pass
+        """Release the HTTP connection pool."""
+        if self._client:
+            await self._client.aclose()
+            self._client = None
+
+    # -- Agent communication ------------------------------------------------
+
+    async def _call_agent(self, prompt: str, pod_id: str) -> dict:
+        """Call the Gradient Agent endpoint with exponential backoff retry.
+
+        Returns the parsed JSON response body from the agent.
+        """
+        last_error: Exception | None = None
+
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                response = await self._client.post(
+                    "/chat/completions",
+                    json={
+                        # Model is "n/a" — the agent manages its own model.
+                        "model": "n/a",
+                        "messages": [
+                            {"role": "user", "content": prompt},
+                        ],
+                        "stream": False,
+                        # Request platform metadata for observability
+                        "include_retrieval_info": True,
+                        "include_guardrails_info": True,
+                    },
+                )
+
+                if response.status_code == 429:
+                    raise create_error(
+                        ErrorCode.GRADIENT_RATE_LIMIT_EXCEEDED,
+                        component="GradientAIProvider",
+                        context={"pod_id": pod_id},
+                    )
+
+                if response.status_code >= 500:
+                    raise create_error(
+                        ErrorCode.GRADIENT_SDK_ERROR,
+                        component="GradientAIProvider",
+                        context={
+                            "reason": f"HTTP {response.status_code}: {response.text[:200]}",
+                        },
+                    )
+
+                response.raise_for_status()
+                body = response.json()
+
+                # Log retrieval and guardrail metadata when present
+                self._log_platform_metadata(body, pod_id)
+
+                return body
+
+            except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                last_error = exc
+                if attempt < self._MAX_RETRIES - 1:
+                    delay = self._BASE_DELAY_SECONDS * (2 ** attempt) + random.uniform(0, 0.3)
+                    logger.warning(
+                        "Gradient Agent call attempt %d/%d failed for pod %s: %s. "
+                        "Retrying in %.2fs",
+                        attempt + 1, self._MAX_RETRIES, pod_id, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise create_error(
+                    ErrorCode.GRADIENT_TIMEOUT,
+                    component="GradientAIProvider",
+                    context={"timeout": self._REQUEST_TIMEOUT_SECONDS, "pod_id": pod_id},
+                ) from exc
+
+            except GradientException:
+                raise
+
+            except Exception as exc:
+                last_error = exc
+                if attempt < self._MAX_RETRIES - 1:
+                    delay = self._BASE_DELAY_SECONDS * (2 ** attempt) + random.uniform(0, 0.3)
+                    logger.warning(
+                        "Gradient Agent call attempt %d/%d failed for pod %s: %s. "
+                        "Retrying in %.2fs",
+                        attempt + 1, self._MAX_RETRIES, pod_id, exc, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise create_error(
+                    ErrorCode.GRADIENT_SDK_ERROR,
+                    component="GradientAIProvider",
+                    context={"reason": str(exc), "pod_id": pod_id},
+                ) from exc
+
+        # Should not reach here, but safeguard
+        raise create_error(
+            ErrorCode.GRADIENT_SDK_ERROR,
+            component="GradientAIProvider",
+            context={"reason": str(last_error), "pod_id": pod_id},
+        )
+
+    def _log_platform_metadata(self, body: dict, pod_id: str) -> None:
+        """Log retrieval (RAG) and guardrail info returned by the platform."""
+        retrieval = body.get("retrieval")
+        if retrieval:
+            sources = retrieval.get("sources", [])
+            logger.info(
+                "Gradient RAG retrieved %d source(s) for pod %s",
+                len(sources), pod_id,
+            )
+
+        guardrails = body.get("guardrails")
+        if guardrails:
+            actions = guardrails.get("actions", [])
+            if actions:
+                logger.warning(
+                    "Gradient Guardrails triggered %d action(s) for pod %s: %s",
+                    len(actions), pod_id, actions,
+                )
+
+    # -- Prompt building ----------------------------------------------------
 
     def _build_prompt(self, context: DecisionContext) -> str:
-        """Build comprehensive prompt for decision making"""
-        import json
-        
+        """Build the user-role prompt with dynamic DecisionContext.
+
+        The agent's system instructions (persona, schema, routing rules)
+        are configured on the platform. This prompt contains only the
+        runtime snapshot the agent needs to make a decision.
+        """
         ctx_data = {
             "pod_id": context.pod_id,
+            "pod_type": context.pod_type,
             "current_location": context.current_location,
-            "capacity": {"available": context.capacity_available},
-            "weight": {"available": context.weight_available},
-            "passengers": context.passengers if context.passengers else [],
-            "cargo": context.cargo if context.cargo else [],
-            "requests": context.available_requests,
-            "network_status": context.network_state,
+            "capacity_available": context.capacity_available,
+            "weight_available": context.weight_available,
+            "passengers_onboard": context.passengers if context.passengers else [],
+            "cargo_onboard": context.cargo if context.cargo else [],
+            "available_requests": context.available_requests,
+            "network_state": context.network_state,
+            "system_metrics": context.system_metrics,
         }
-        
-        return f"""
-Analyze the transportation scenario and output ONLY valid JSON matching the schema.
 
-Context:
-{json.dumps(ctx_data, indent=2, default=str)}
+        return (
+            "Make a routing decision for this pod. "
+            "Output ONLY a raw JSON object matching the decision schema.\n\n"
+            f"```json\n{json.dumps(ctx_data, indent=2, default=str)}\n```"
+        )
 
-Decision Task:
-1. Evaluate requests vs constraints.
-2. Optimize route for efficiency.
-3. Output JSON with fields: accepted_requests, rejected_requests, route, estimated_duration, confidence, reasoning.
-"""
+    # -- Response parsing ---------------------------------------------------
 
-    def _get_system_instruction(self) -> str:
-        """Get system instruction and formatting requirements"""
-        return """
-You are the AEXIS Central Routing Intelligence on DigitalOcean Gradient. 
-Optimize pod routing for efficiency and safety.
-CRITICAL ROUTING RULES:
-1. If you have passengers or cargo onboard, you MUST include their destinations in your route.
-2. Prioritize dropping off onboard payload before fulfilling new requests.
-3. The first stops in your route should be the destinations of the payload currently onboard.
-Output MUST be a single raw JSON object. No markdown. No reasoning outside JSON.
-{
-    "accepted_requests": [],
-    "rejected_requests": [],
-    "route": ["station_id", ...],
-    "estimated_duration": <int>,
-    "confidence": <float>,
-    "reasoning": "<string>"
-}
-"""
+    def _parse_response(self, body: dict, context: DecisionContext) -> Decision:
+        """Extract the decision JSON from the agent response body.
 
-    def _parse_response(self, response, context: DecisionContext) -> Decision:
-        """Parse Gradient response into Decision object"""
-        import json
-        
-        text = response.generated_output.strip()
-        try:
-            # Clean up potential markdown formatting
-            if text.startswith("```json"):
-                text = text[7:]
-            if text.startswith("```"):
-                text = text[3:]
-            if text.endswith("```"):
-                text = text[:-3]
-            text = text.strip()
-            
-            data = json.loads(text)
-            
-            return Decision(
-                decision_type="route_selection",
-                accepted_requests=data.get("accepted_requests", []),
-                rejected_requests=data.get("rejected_requests", []),
-                route=data.get("route", [context.current_location]),
-                estimated_duration=data.get("estimated_duration", 0),
-                confidence=float(data.get("confidence", 0.0)),
-                reasoning=data.get("reasoning", "Gradient decision"),
-                fallback_used=False,
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to parse Gradient response: {e}\nRaw: {text}")
+        Handles common LLM output quirks:
+        - JSON wrapped in markdown code fences
+        - Extra text before/after JSON
+        """
+        choices = body.get("choices", [])
+        if not choices:
             raise create_error(
                 ErrorCode.GRADIENT_RESPONSE_PARSING_FAILED,
                 component="GradientAIProvider",
-                context={"error": str(e), "text_snippet": text[:100]}
+                context={"reason": "Empty choices array", "pod_id": context.pod_id},
             )
+
+        text = choices[0].get("message", {}).get("content", "").strip()
+        if not text:
+            raise create_error(
+                ErrorCode.GRADIENT_RESPONSE_PARSING_FAILED,
+                component="GradientAIProvider",
+                context={"reason": "Empty message content", "pod_id": context.pod_id},
+            )
+
+        # Log token usage for cost monitoring
+        usage = body.get("usage")
+        if usage:
+            logger.debug(
+                "Gradient tokens — prompt: %d, completion: %d, total: %d (pod %s)",
+                usage.get("prompt_tokens", 0),
+                usage.get("completion_tokens", 0),
+                usage.get("total_tokens", 0),
+                context.pod_id,
+            )
+
+        data = self._extract_json(text, context.pod_id)
+        self._validate_decision_fields(data, context.pod_id)
+
+        route = data.get("route", [])
+        if not route:
+            route = [context.current_location]
+
+        confidence = data.get("confidence", 0.0)
+        confidence = max(0.0, min(1.0, float(confidence)))
+
+        return Decision(
+            decision_type="route_selection",
+            accepted_requests=data.get("accepted_requests", []),
+            rejected_requests=data.get("rejected_requests", []),
+            route=route,
+            estimated_duration=int(data.get("estimated_duration", 0)),
+            confidence=confidence,
+            reasoning=data.get("reasoning", "Gradient Agent decision"),
+            fallback_used=False,
+        )
+
+    def _extract_json(self, text: str, pod_id: str) -> dict:
+        """Extract a JSON object from potentially noisy LLM output."""
+        # Strategy 1: direct parse
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+
+        # Strategy 2: strip markdown fences
+        cleaned = text
+        if "```" in cleaned:
+            # Remove all code fence markers
+            cleaned = cleaned.replace("```json", "").replace("```", "").strip()
+            try:
+                return json.loads(cleaned)
+            except json.JSONDecodeError:
+                pass
+
+        # Strategy 3: find first { ... last }
+        first_brace = text.find("{")
+        last_brace = text.rfind("}")
+        if first_brace != -1 and last_brace > first_brace:
+            try:
+                return json.loads(text[first_brace : last_brace + 1])
+            except json.JSONDecodeError:
+                pass
+
+        raise create_error(
+            ErrorCode.GRADIENT_RESPONSE_PARSING_FAILED,
+            component="GradientAIProvider",
+            context={
+                "reason": "No valid JSON found in agent response",
+                "text_snippet": text[:200],
+                "pod_id": pod_id,
+            },
+        )
+
+    def _validate_decision_fields(self, data: dict, pod_id: str) -> None:
+        """Validate that the parsed JSON has the expected structure."""
+        for field, expected_type in _DECISION_SCHEMA_FIELDS.items():
+            if field not in data:
+                raise create_error(
+                    ErrorCode.GRADIENT_RESPONSE_PARSING_FAILED,
+                    component="GradientAIProvider",
+                    context={
+                        "reason": f"Missing required field: {field}",
+                        "pod_id": pod_id,
+                    },
+                )
+            if not isinstance(data[field], expected_type):
+                raise create_error(
+                    ErrorCode.GRADIENT_RESPONSE_PARSING_FAILED,
+                    component="GradientAIProvider",
+                    context={
+                        "reason": f"Field '{field}' has wrong type: "
+                                  f"expected {expected_type}, got {type(data[field])}",
+                        "pod_id": pod_id,
+                    },
+                )
 
 
 class MockAIProvider(AIProvider):
-    """Mock AI provider for testing and development"""
+    """Deterministic mock provider for tests and offline development."""
 
     def __init__(self, response_delay: float = 0.1):
         self.response_delay = response_delay
         self.call_count = 0
 
     async def make_decision(self, context: DecisionContext) -> Decision:
-        """Make mock decision"""
-        import asyncio
-
+        """Return a simple deterministic decision."""
         await asyncio.sleep(self.response_delay)
-
         self.call_count += 1
 
-        # Simple mock logic
+        accepted = []
         if context.available_requests:
-            accepted = (
-                [context.available_requests[0].get("id")]
-                if context.available_requests
-                else []
-            )
-        else:
-            accepted = []
+            first_id = context.available_requests[0].get("id")
+            if first_id:
+                accepted = [first_id]
 
         return Decision(
             decision_type="route_selection",
@@ -225,50 +423,65 @@ class MockAIProvider(AIProvider):
     def is_available(self) -> bool:
         return True
 
-    def get_provider_name(self) -> str:
-        return "Mock AI"
-
     async def close(self):
         pass
 
 
 class AIProviderFactory:
-    """Factory for creating AI providers"""
+    """Factory for creating AI providers from environment configuration.
+
+    Gradient Agent provider requires:
+      GRADIENT_AGENT_ENDPOINT  — the agent's base URL
+      GRADIENT_AGENT_ACCESS_KEY — Bearer token for the agent endpoint
+
+    Mock provider requires no configuration.
+    """
 
     @staticmethod
-    def create_provider(provider_type: str, **kwargs) -> AIProvider:
-        """Create AI provider instance"""
-        if provider_type.lower() == "gradient":
-            import os
-            from gradientai import Gradient
-            
-            token = os.environ.get("GRADIENT_ACCESS_TOKEN")
-            workspace_id = os.environ.get("GRADIENT_WORKSPACE_ID")
-            
-            if not token or not workspace_id:
-                raise create_error(
-                    ErrorCode.CONFIG_INVALID_VALUE,
-                    component="AIProviderFactory",
-                    context={"missing_env": ["GRADIENT_ACCESS_TOKEN", "GRADIENT_WORKSPACE_ID"]},
-                )
-                
-            client = Gradient(access_token=token, workspace_id=workspace_id)
-            return GradientAIProvider(client, workspace_id)
+    def create_provider(provider_type: str = "auto", **kwargs) -> AIProvider:
+        """Create an AI provider instance.
 
-        elif provider_type.lower() == "mock":
-            return MockAIProvider(kwargs.get("response_delay", 0.1))
+        Args:
+            provider_type: One of "gradient", "mock", or "auto".
+                           "auto" creates Gradient if env vars are set, else Mock.
+        """
+        if provider_type == "auto":
+            endpoint = os.environ.get("GRADIENT_AGENT_ENDPOINT", "")
+            access_key = os.environ.get("GRADIENT_AGENT_ACCESS_KEY", "")
+            if endpoint and access_key:
+                provider_type = "gradient"
+            else:
+                provider_type = "mock"
 
-        else:
-            raise create_error(
-                ErrorCode.CONFIG_INVALID_VALUE,
-                component="AIProviderFactory",
-                context={
-                    "provider_type": provider_type,
-                    "supported": ["gradient", "mock"],
-                },
+        if provider_type == "gradient":
+            endpoint = kwargs.get(
+                "agent_endpoint",
+                os.environ.get("GRADIENT_AGENT_ENDPOINT", ""),
             )
+            access_key = kwargs.get(
+                "agent_access_key",
+                os.environ.get("GRADIENT_AGENT_ACCESS_KEY", ""),
+            )
+            return GradientAIProvider(
+                agent_endpoint=endpoint,
+                agent_access_key=access_key,
+            )
+
+        if provider_type == "mock":
+            return MockAIProvider(
+                response_delay=kwargs.get("response_delay", 0.1),
+            )
+
+        raise create_error(
+            ErrorCode.CONFIG_INVALID_VALUE,
+            component="AIProviderFactory",
+            context={
+                "var_name": "provider_type",
+                "value": provider_type,
+            },
+        )
 
     @staticmethod
     def get_available_providers() -> list[str]:
-        """Get list of available provider types"""
-        return ["gradient", "mock"]
+        """List supported provider types."""
+        return ["gradient", "mock", "auto"]

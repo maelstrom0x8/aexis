@@ -377,3 +377,5 @@ docs
 
 aexis.json
 .aexis
+aggregate_logs.py
+.gradient

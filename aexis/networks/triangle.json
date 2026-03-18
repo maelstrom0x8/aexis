@@ -1,0 +1,60 @@
+{
+  "name": "triangle_2pods",
+  "description": "Simple 3-station triangle topology for basic routing tests",
+  "nodes": [
+    {
+      "id": "1",
+      "label": "1",
+      "coordinate": {
+        "x": 0,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "2",
+          "weight": 100.0
+        },
+        {
+          "node_id": "3",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "2",
+      "label": "2",
+      "coordinate": {
+        "x": 100,
+        "y": 0
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 100.0
+        },
+        {
+          "node_id": "3",
+          "weight": 100.0
+        }
+      ]
+    },
+    {
+      "id": "3",
+      "label": "3",
+      "coordinate": {
+        "x": 50,
+        "y": 87
+      },
+      "adj": [
+        {
+          "node_id": "1",
+          "weight": 100.0
+        },
+        {
+          "node_id": "2",
+          "weight": 100.0
+        }
+      ]
+    }
+  ]
+}

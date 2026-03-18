@@ -17,16 +17,16 @@ import json
 import logging
 import os
 import signal
-import sys
 
 import redis.asyncio as redis
 
 from aexis.core.logging_config import setup_logging
 from aexis.core.message_bus import MessageBus
 from aexis.core.network import NetworkContext, load_network_data
-from aexis.core.routing import OfflineRouter, RoutingProvider
+from aexis.core.ai_provider import AIProviderFactory
+from aexis.core.routing import AIRouter, OfflineRouter, RoutingProvider
 from aexis.core.station_client import StationClient
-from aexis.pod import CargoPod, PassengerPod, PodType
+from aexis.pod import CargoPod, PassengerPod
 
 logger = logging.getLogger("aexis.pod")
 
@@ -160,8 +160,28 @@ async def run_pod(args: argparse.Namespace):
     # Station client for remote queue access
     station_client = StationClient(redis_client)
 
-    # Routing provider
+    # Routing provider — AI primary if credentials are set, offline fallback always
     routing_provider = RoutingProvider()
+
+    agent_endpoint = os.getenv("GRADIENT_AGENT_ENDPOINT", "")
+    agent_access_key = os.getenv("GRADIENT_AGENT_ACCESS_KEY", "")
+
+    if agent_endpoint and agent_access_key:
+        try:
+            ai_provider = AIProviderFactory.create_provider(
+                "gradient",
+                agent_endpoint=agent_endpoint,
+                agent_access_key=agent_access_key,
+            )
+            routing_provider.add_router(AIRouter(pod_id, ai_provider=ai_provider))
+            logger.info("AI routing enabled via Gradient Agent for pod %s", pod_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialise Gradient AI provider for pod %s: %s. "
+                "Falling back to offline routing.",
+                pod_id, exc,
+            )
+
     routing_provider.add_router(OfflineRouter())
 
     # Create pod
