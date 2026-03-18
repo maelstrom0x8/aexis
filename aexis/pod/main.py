@@ -1,15 +1,3 @@
-"""Pod process entry point.
-
-Usage:
-    python -m aexis.pod.main --pod-id pod_001 --type passenger --redis-url redis://localhost:6379
-
-Each pod instance runs as a standalone process:
-  1. Connects to Redis
-  2. Creates a StationClient for remote station queue access
-  3. Spawns at a random network edge (or specified station)
-  4. Runs its own movement loop + subscribes to events
-  5. Accepts dev commands on aexis:cmd:pod:{id}
-"""
 
 import argparse
 import asyncio
@@ -30,20 +18,10 @@ from aexis.pod import CargoPod, PassengerPod
 
 logger = logging.getLogger("aexis.pod")
 
-
 async def _handle_commands(
     redis_client: redis.Redis,
     pod,
 ):
-    """Listen for dev/ops commands on a dedicated Redis channel.
-
-    Supported commands:
-      {"cmd": "status"}
-      {"cmd": "assign_route", "stations": ["station_001", "station_003"]}
-      {"cmd": "set_speed", "speed": 30.0}
-
-    Responses published to the channel specified in "reply_to".
-    """
     channel = f"aexis:cmd:pod:{pod.pod_id}"
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(channel)
@@ -114,18 +92,14 @@ async def _handle_commands(
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()
 
-
 async def run_pod(args: argparse.Namespace):
-    """Main async entry point for a pod process."""
     redis_url = args.redis_url
     redis_password = args.redis_password or os.getenv("REDIS_PASSWORD")
     pod_id = args.pod_id
     pod_type = args.type
 
-    # Setup structured logging
     setup_logging("pod", pod_id)
 
-    # Connect to Redis
     redis_client = redis.from_url(
         redis_url,
         password=redis_password,
@@ -139,13 +113,11 @@ async def run_pod(args: argparse.Namespace):
         logger.error(f"Cannot connect to Redis at {redis_url}: {e}")
         return
 
-    # Message bus
     message_bus = MessageBus(redis_url=redis_url, password=redis_password)
     if not await message_bus.connect():
         logger.error("Failed to connect MessageBus")
         return
 
-    # Network topology
     network_path = args.network_path or os.getenv(
         "AEXIS_NETWORK_DATA", "aexis/network.json"
     )
@@ -157,10 +129,8 @@ async def run_pod(args: argparse.Namespace):
         logger.error("No network data — pod cannot operate without topology")
         return
 
-    # Station client for remote queue access
     station_client = StationClient(redis_client)
 
-    # Routing provider — AI primary if credentials are set, offline fallback always
     routing_provider = RoutingProvider()
 
     agent_endpoint = os.getenv("GRADIENT_AGENT_ENDPOINT", "")
@@ -184,7 +154,6 @@ async def run_pod(args: argparse.Namespace):
 
     routing_provider.add_router(OfflineRouter())
 
-    # Create pod
     if pod_type == "cargo":
         pod = CargoPod(
             message_bus, redis_client, pod_id, station_client, routing_provider
@@ -194,10 +163,9 @@ async def run_pod(args: argparse.Namespace):
             message_bus, redis_client, pod_id, station_client, routing_provider
         )
 
-    # Spawn position
     nc = NetworkContext.get_instance()
     if args.station:
-        # Spawn at specified station
+
         from aexis.core.model import LocationDescriptor, Coordinate
 
         pos = nc.station_positions.get(args.station, (0, 0))
@@ -207,7 +175,7 @@ async def run_pod(args: argparse.Namespace):
             coordinate=Coordinate(pos[0], pos[1]),
         )
     else:
-        # Default: spawn at random station (docked)
+
         from aexis.core.model import LocationDescriptor, Coordinate
 
         station_id = nc.get_random_station()
@@ -223,7 +191,6 @@ async def run_pod(args: argparse.Namespace):
 
     await pod.start()
 
-    # Launch tasks
     movement_task = asyncio.create_task(pod.run_movement_loop())
     cmd_task = asyncio.create_task(_handle_commands(redis_client, pod))
     bus_task = asyncio.create_task(message_bus.start_listening())
@@ -245,7 +212,6 @@ async def run_pod(args: argparse.Namespace):
 
     await shutdown_event.wait()
 
-    # Cleanup
     movement_task.cancel()
     cmd_task.cancel()
     bus_task.cancel()
@@ -254,7 +220,6 @@ async def run_pod(args: argparse.Namespace):
     await message_bus.disconnect()
     await redis_client.aclose()
     logger.info(f"Pod {pod_id} shut down")
-
 
 def main():
     parser = argparse.ArgumentParser(description="AEXIS Pod Process")
@@ -295,7 +260,6 @@ def main():
     )
     args = parser.parse_args()
     asyncio.run(run_pod(args))
-
 
 if __name__ == "__main__":
     main()

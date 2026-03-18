@@ -1,15 +1,3 @@
-"""Multi-stop delivery tests with micro-step state-transition assertions.
-
-Every sub-operation within each stop is an assertion point:
-status, passenger/cargo count, weight, events published, snapshots written.
-
-Covers:
-- PassengerPod 3-stop delivery: status sequence, passenger count per step, events per stop
-- CargoPod 3-stop delivery: weight decrement per step, cargo count per step
-- Delivery-then-pickup at same station: status + passengers between delivery and pickup
-- Pass-through with no matching payload: no UNLOADING entered
-- Duplicate-destination passengers: both delivered at same stop
-"""
 
 import asyncio
 from datetime import UTC, datetime
@@ -27,14 +15,7 @@ from aexis.tests.conftest import (
     make_passenger_pod,
 )
 
-
-# ======================================================================
-# Helpers
-# ======================================================================
-
-
 def _make_status_tracker(pod):
-    """Instrument a pod to record every status value at each _publish_status_update."""
     status_log = []
     original_publish = pod._publish_status_update
 
@@ -45,9 +26,7 @@ def _make_status_tracker(pod):
     pod._publish_status_update = tracking_publish
     return status_log
 
-
 def _make_event_tracker(pod):
-    """Instrument a pod to record every event published."""
     events = []
     original_publish = pod._publish_event
 
@@ -63,9 +42,7 @@ def _make_event_tracker(pod):
     pod._publish_event = tracking_publish
     return events
 
-
 def _make_snapshot_tracker(pod):
-    """Instrument a pod to capture state at each snapshot write."""
     snapshots = []
     original_snapshot = pod._publish_state_snapshot
 
@@ -81,16 +58,7 @@ def _make_snapshot_tracker(pod):
     pod._publish_state_snapshot = tracking_snapshot
     return snapshots
 
-
-# ======================================================================
-# Passenger multi-stop micro-transitions
-# ======================================================================
-
-
 class TestPassengerMultiStopMicroTransitions:
-    """Pod with 3 passengers for stations 2, 3, 4.
-    Delivers correct subset at each stop, retains the rest.
-    """
 
     def _make_loaded_pod(self, message_bus, redis_client, station_client):
         pod = make_passenger_pod(
@@ -107,19 +75,13 @@ class TestPassengerMultiStopMicroTransitions:
     async def test_status_sequence_across_3_stops(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Collect every status at _publish_status_update.
-        Expected: [UNLOADING, UNLOADING, UNLOADING] from the 3 delivery calls.
-        EN_ROUTE is set after each delivery but _publish_status_update is NOT
-        called at that point — only at the UNLOADING transition.
-        """
         pod = self._make_loaded_pod(message_bus, redis_client, station_client)
         status_log = _make_status_tracker(pod)
 
-        # Stop 1
         await pod._execute_delivery("2")
-        # Stop 2
+
         await pod._execute_delivery("3")
-        # Stop 3
+
         await pod._execute_delivery("4")
 
         unloading_entries = [s for s in status_log if s == PodStatus.UNLOADING]
@@ -128,7 +90,6 @@ class TestPassengerMultiStopMicroTransitions:
     async def test_passenger_count_at_each_micro_step(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Assert exact passenger count after each _execute_delivery."""
         pod = self._make_loaded_pod(message_bus, redis_client, station_client)
 
         assert len(pod.passengers) == 3
@@ -149,7 +110,6 @@ class TestPassengerMultiStopMicroTransitions:
     async def test_events_published_per_stop(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Each stop should produce exactly 1 PassengerDelivered event."""
         pod = self._make_loaded_pod(message_bus, redis_client, station_client)
         events = _make_event_tracker(pod)
 
@@ -183,7 +143,6 @@ class TestPassengerMultiStopMicroTransitions:
     async def test_snapshot_written_at_each_unloading(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """A snapshot should fire at each UNLOADING transition (3 times)."""
         pod = self._make_loaded_pod(message_bus, redis_client, station_client)
         snapshots = _make_snapshot_tracker(pod)
 
@@ -192,21 +151,19 @@ class TestPassengerMultiStopMicroTransitions:
         await pod._execute_delivery("4")
 
         assert len(snapshots) == 3
-        # Snapshot 1: status=UNLOADING, 3 passengers still present (snapshot
-        # fires before removal in the sleep window)
+
         assert snapshots[0]["status"] == "unloading"
         assert snapshots[0]["passenger_count"] == 3
-        # Snapshot 2: 2 passengers remain
+
         assert snapshots[1]["status"] == "unloading"
         assert snapshots[1]["passenger_count"] == 2
-        # Snapshot 3: 1 passenger remains
+
         assert snapshots[2]["status"] == "unloading"
         assert snapshots[2]["passenger_count"] == 1
 
     async def test_post_final_delivery_status(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """After last delivery, status should be EN_ROUTE (set by delivery code)."""
         pod = self._make_loaded_pod(message_bus, redis_client, station_client)
 
         await pod._execute_delivery("2")
@@ -219,16 +176,7 @@ class TestPassengerMultiStopMicroTransitions:
         assert pod.status == PodStatus.EN_ROUTE
         assert len(pod.passengers) == 0
 
-
-# ======================================================================
-# Cargo multi-stop weight tracking
-# ======================================================================
-
-
 class TestCargoMultiStopWeight:
-    """Pod with 3 cargo items: c_a→2 (100kg), c_b→3 (150kg), c_c→4 (200kg).
-    Weight decremented correctly at each stop.
-    """
 
     def _make_loaded_pod(self, message_bus, redis_client, station_client):
         pod = make_cargo_pod(
@@ -323,16 +271,7 @@ class TestCargoMultiStopWeight:
         unloading_entries = [s for s in status_log if s == PodStatus.UNLOADING]
         assert len(unloading_entries) == 3
 
-
-# ======================================================================
-# Delivery then pickup at same station
-# ======================================================================
-
-
 class TestDeliveryThenPickupAtSameStation:
-    """Pod delivers p_a at station 2, then picks up p_new from station 2.
-    Asserts micro-state between delivery and pickup.
-    """
 
     async def test_deliver_then_pickup_status_sequence(
         self, message_bus, redis_client, station_client, network_context,
@@ -346,15 +285,12 @@ class TestDeliveryThenPickupAtSameStation:
             {"passenger_id": "p_b", "destination": "4", "pickup_time": now},
         ]
 
-        # Seed a passenger at station 2 for pickup
         await async_seed_passenger(redis_client, "2", "p_new", "3")
 
         status_log = _make_status_tracker(pod)
 
-        # Delivery phase
         await pod._execute_delivery("2")
 
-        # Micro-window: between delivery and pickup
         assert pod.status == PodStatus.EN_ROUTE
         assert len(pod.passengers) == 1
         assert pod.passengers[0]["passenger_id"] == "p_b"
@@ -362,7 +298,6 @@ class TestDeliveryThenPickupAtSameStation:
         delivery_statuses = [s for s in status_log if s == PodStatus.UNLOADING]
         assert len(delivery_statuses) == 1
 
-        # Pickup phase
         await pod._execute_pickup("2")
 
         pickup_statuses = [s for s in status_log if s == PodStatus.LOADING]
@@ -371,7 +306,6 @@ class TestDeliveryThenPickupAtSameStation:
     async def test_passenger_list_between_delivery_and_pickup(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """After delivery but before pickup, only p_b remains."""
         pod = make_passenger_pod(
             message_bus, redis_client, station_client, station_id="2"
         )
@@ -384,7 +318,6 @@ class TestDeliveryThenPickupAtSameStation:
 
         await pod._execute_delivery("2")
 
-        # Narrow window: delivery done, pickup not yet started
         ids_after_delivery = [p["passenger_id"] for p in pod.passengers]
         assert ids_after_delivery == ["p_b"]
         assert len(pod.passengers) == 1
@@ -392,7 +325,6 @@ class TestDeliveryThenPickupAtSameStation:
     async def test_passenger_list_after_pickup(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """After pickup, p_b + p_new should both be onboard."""
         pod = make_passenger_pod(
             message_bus, redis_client, station_client, station_id="2"
         )
@@ -412,14 +344,7 @@ class TestDeliveryThenPickupAtSameStation:
         assert "p_a" not in ids
         assert len(pod.passengers) == 2
 
-
-# ======================================================================
-# Pass-through with no matching payload
-# ======================================================================
-
-
 class TestPassThroughNoDelivery:
-    """Pod with passengers for station 3 arrives at station 2 — no delivery."""
 
     async def test_no_unloading_status_when_no_match(
         self, message_bus, redis_client, station_client, network_context,
@@ -435,7 +360,6 @@ class TestPassThroughNoDelivery:
 
         await pod._execute_delivery("2")
 
-        # Status never entered UNLOADING
         assert PodStatus.UNLOADING not in status_log
         assert len(pod.passengers) == 1
         assert pod.passengers[0]["passenger_id"] == "p_x"
@@ -457,14 +381,7 @@ class TestPassThroughNoDelivery:
         assert pod.current_weight == 100.0
         assert len(pod.cargo) == 1
 
-
-# ======================================================================
-# Duplicate destination
-# ======================================================================
-
-
 class TestDuplicateDestination:
-    """Two passengers both going to station 2 — both delivered at same stop."""
 
     async def test_both_delivered_at_same_stop(
         self, message_bus, redis_client, station_client, network_context,
@@ -482,21 +399,18 @@ class TestDuplicateDestination:
 
         await pod._execute_delivery("2")
 
-        # Both p_1 and p_2 should be delivered
         delivered_ids = [
             e["passenger_id"]
             for e in events if e["type"] == "PassengerDelivered"
         ]
         assert set(delivered_ids) == {"p_1", "p_2"}
 
-        # p_3 should remain
         assert len(pod.passengers) == 1
         assert pod.passengers[0]["passenger_id"] == "p_3"
 
     async def test_duplicate_cargo_destination_weight(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Two cargo items to same station — both delivered, weight decremented."""
         pod = make_cargo_pod(
             message_bus, redis_client, station_client, station_id="1"
         )
@@ -514,16 +428,7 @@ class TestDuplicateDestination:
         assert len(pod.cargo) == 1
         assert pod.cargo[0]["request_id"] == "c_3"
 
-
-# ======================================================================
-# Cargo weight tracking across mixed stops (pickup + delivery)
-# ======================================================================
-
-
 class TestCargoWeightTrackingAcrossStops:
-    """Pod starts at 450kg, delivers at stop 1 (350kg remaining),
-    delivers at stop 2 (150kg remaining), picks up 50kg at stop 2 (200kg).
-    """
 
     async def test_weight_through_delivery_and_pickup(
         self, message_bus, redis_client, station_client, network_context,
@@ -540,20 +445,16 @@ class TestCargoWeightTrackingAcrossStops:
         ]
         pod.current_weight = 300.0
 
-        # Stop 1: deliver c_a at station 2
         await pod._execute_delivery("2")
         assert pod.current_weight == 200.0
         assert len(pod.cargo) == 1
 
-        # Stop 2: deliver c_b at station 3
         await pod._execute_delivery("3")
         assert pod.current_weight == 0.0
         assert len(pod.cargo) == 0
 
-        # Seed new cargo at station 3 for pickup
         await async_seed_cargo(redis_client, "3", "c_new", "4", 50.0)
 
-        # Pickup at station 3
         pod.location_descriptor = LocationDescriptor(
             location_type="station", node_id="3",
             coordinate=Coordinate(0, 100),

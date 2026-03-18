@@ -10,10 +10,8 @@ from aexis.web.dashboard import WebDashboard
 
 logger = logging.getLogger(__name__)
 
-
 async def main():
-    """Main entry point for Dashboard Service"""
-    # Setup structured logging
+
     setup_logging("web")
     try:
         host = os.getenv("UI_HOST", "0.0.0.0")
@@ -33,7 +31,6 @@ async def main():
     except Exception as e:
         logger.error(f"Dashboard Service failed: {e}", exc_info=True)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     asyncio.run(main())

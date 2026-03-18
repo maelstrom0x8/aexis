@@ -1,17 +1,3 @@
-"""Station event handler integration tests.
-
-Covers:
-- Event dispatch routing (each event_type to correct handler, unknown silently skipped)
-- Passenger flow: arrival→Redis→pickup→delete→snapshot (incremental)
-- Cargo flow: request→Redis→loading→delete→snapshot (incremental)
-- Delivery events are informational (no queue mutation)
-- Bay management: PodArrival/PodStatusUpdate increment/decrement with bounds
-- Congestion boundaries: parameterized thresholds, recovery, formula weight verification
-- Congestion alert severity: medium/high/critical gradations, ≤0.7 guard
-- Capacity update command: valid, wrong station, zero values, missing params
-- State snapshot resilience: Redis write failure
-- Edge cases: missing passenger_id, count-below-zero clamp, corrupt Redis data
-"""
 
 import json
 
@@ -21,14 +7,7 @@ from aexis.core.message_bus import MessageBus
 from aexis.core.model import Priority, StationStatus
 from aexis.station import Station
 
-
-# ======================================================================
-# Event dispatch
-# ======================================================================
-
-
 class TestStationEventDispatch:
-    """Each event_type goes to the correct internal handler; unknown types are silent."""
 
     async def test_passenger_arrival_dispatches(
         self, message_bus, redis_client,
@@ -113,14 +92,7 @@ class TestStationEventDispatch:
         })
         assert station._cargo_count == 0
 
-
-# ======================================================================
-# Passenger flow (incremental — later tests depend on earlier)
-# ======================================================================
-
-
 class TestStationPassengerFlow:
-    """Full passenger queue lifecycle. Tests are ordered; later skip if earlier fail."""
 
     async def test_01_arrival_writes_to_redis(
         self, message_bus, redis_client,
@@ -158,7 +130,7 @@ class TestStationPassengerFlow:
     ):
         station = Station(message_bus, redis_client, "1")
         await station._handle_passenger_arrival({
-            "station_id": "2",  # wrong
+            "station_id": "2",
             "passenger_id": "p_wrong",
             "destination": "3",
         })
@@ -171,18 +143,11 @@ class TestStationPassengerFlow:
         await station._handle_passenger_arrival({
             "station_id": "1",
             "destination": "2",
-            # no passenger_id
+
         })
         assert station._passenger_count == 0
 
-
-# ======================================================================
-# Cargo flow (incremental)
-# ======================================================================
-
-
 class TestStationCargoFlow:
-    """Full cargo queue lifecycle."""
 
     async def test_01_request_writes_to_redis(
         self, message_bus, redis_client,
@@ -218,7 +183,7 @@ class TestStationCargoFlow:
     ):
         station = Station(message_bus, redis_client, "1")
         await station._handle_cargo_request({
-            "origin": "2",  # wrong
+            "origin": "2",
             "request_id": "c_wrong",
             "destination": "3",
             "weight": 50.0,
@@ -233,31 +198,24 @@ class TestStationCargoFlow:
             "origin": "1",
             "destination": "3",
             "weight": 50.0,
-            # no request_id
+
         })
         assert station._cargo_count == 0
 
-
-# ======================================================================
-# Delivery is informational
-# ======================================================================
-
-
 class TestDeliveryIsInformational:
-    """Passenger/cargo delivered events at this station produce no queue mutation."""
 
     async def test_passenger_delivery_no_mutation(
         self, message_bus, redis_client,
     ):
         station = Station(message_bus, redis_client, "1")
-        # Add a passenger to prove it's not removed by delivery event
+
         await station._handle_passenger_arrival({
             "station_id": "1", "passenger_id": "p_stay", "destination": "2",
         })
         await station._handle_passenger_delivery({
             "station_id": "1", "passenger_id": "p_delivered",
         })
-        assert station._passenger_count == 1  # unchanged
+        assert station._passenger_count == 1
 
     async def test_cargo_delivery_no_mutation(
         self, message_bus, redis_client,
@@ -270,13 +228,13 @@ class TestDeliveryIsInformational:
         await station._handle_cargo_delivery({
             "station_id": "1", "request_id": "c_delivered",
         })
-        assert station._cargo_count == 1  # unchanged
+        assert station._cargo_count == 1
 
     async def test_delivery_wrong_station_ignored(
         self, message_bus, redis_client,
     ):
         station = Station(message_bus, redis_client, "1")
-        # Should simply return without error
+
         await station._handle_passenger_delivery({
             "station_id": "999", "passenger_id": "p_x",
         })
@@ -284,14 +242,7 @@ class TestDeliveryIsInformational:
             "station_id": "999", "request_id": "c_x",
         })
 
-
-# ======================================================================
-# Bay management
-# ======================================================================
-
-
 class TestStationBayManagement:
-    """Loading bay counts bounded by [0, loading_bays]."""
 
     async def test_pod_arrival_decrements_bay(
         self, message_bus, redis_client,
@@ -343,7 +294,7 @@ class TestStationBayManagement:
                 "station_id": "1",
             }
         })
-        assert station.available_bays == 0  # clamped
+        assert station.available_bays == 0
 
     async def test_bays_ceiling_at_loading_bays(
         self, message_bus, redis_client,
@@ -358,27 +309,20 @@ class TestStationBayManagement:
                 "status": "en_route",
             }
         })
-        assert station.available_bays == 4  # clamped at max
-
-
-# ======================================================================
-# Congestion boundaries
-# ======================================================================
-
+        assert station.available_bays == 4
 
 class TestCongestionBoundaries:
-    """Parameterized congestion thresholds and status flipping."""
 
     @pytest.mark.parametrize("passengers,cargo,bays_used,expected_status", [
-        # Low congestion: 5/20 * 0.4 + 0/10 * 0.3 + 0/4 * 0.3 = 0.1
+
         (5, 0, 0, StationStatus.OPERATIONAL),
-        # Moderate: 15/20*0.4 + 5/10*0.3 + 2/4*0.3 = 0.3+0.15+0.15 = 0.6
+
         (15, 5, 2, StationStatus.OPERATIONAL),
-        # High: 20/20*0.4 + 10/10*0.3 + 4/4*0.3 = 0.4+0.3+0.3 = 1.0
+
         (20, 10, 4, StationStatus.CONGESTED),
-        # Boundary: 20/20*0.4 + 8/10*0.3 + 2/4*0.3 = 0.4+0.24+0.15 = 0.79
+
         (20, 8, 2, StationStatus.OPERATIONAL),
-        # Just over: 20/20*0.4 + 10/10*0.3 + 2/4*0.3 = 0.4+0.3+0.15 = 0.85
+
         (20, 10, 2, StationStatus.CONGESTED),
     ])
     async def test_congestion_threshold(
@@ -397,14 +341,13 @@ class TestCongestionBoundaries:
         self, message_bus, redis_client,
     ):
         station = Station(message_bus, redis_client, "1")
-        # Push into congested
+
         station._passenger_count = 25
         station._cargo_count = 15
         station.available_bays = 0
         station._update_congestion_level()
         assert station.status == StationStatus.CONGESTED
 
-        # Drain queues
         station._passenger_count = 2
         station._cargo_count = 0
         station.available_bays = 4
@@ -412,14 +355,7 @@ class TestCongestionBoundaries:
         assert station.status == StationStatus.OPERATIONAL
         assert station.congestion_level < 0.3
 
-
-# ======================================================================
-# Congestion alert severity
-# ======================================================================
-
-
 class TestCongestionAlertSeverity:
-    """_publish_congestion_alert severity gradations and ≤0.7 guard."""
 
     async def test_alert_suppressed_at_low_congestion(
         self, message_bus, redis_client,
@@ -469,14 +405,7 @@ class TestCongestionAlertSeverity:
         assert len(congestion_alerts) == 1
         assert congestion_alerts[0].severity == expected_severity
 
-
-# ======================================================================
-# Capacity update command
-# ======================================================================
-
-
 class TestCapacityUpdateCommand:
-    """_handle_capacity_update and _handle_system_command."""
 
     async def test_valid_update(self, message_bus, redis_client):
         station = Station(message_bus, redis_client, "1")
@@ -502,7 +431,7 @@ class TestCapacityUpdateCommand:
                 "parameters": {"max_pods": 10},
             }
         })
-        assert station.loading_bays == 4  # unchanged
+        assert station.loading_bays == 4
 
     async def test_unknown_command_type_ignored(
         self, message_bus, redis_client,
@@ -514,7 +443,7 @@ class TestCapacityUpdateCommand:
                 "target": "1",
             }
         })
-        # No crash, no state change
+
         assert station.loading_bays == 4
 
     async def test_missing_params_uses_defaults(
@@ -529,14 +458,7 @@ class TestCapacityUpdateCommand:
         assert station.loading_bays == original_bays
         assert station.processing_rate == original_rate
 
-
-# ======================================================================
-# Pickup edge cases
-# ======================================================================
-
-
 class TestPassengerPickupEdgeCases:
-    """Pickup of nonexistent passenger; count never goes below 0."""
 
     async def test_pickup_nonexistent_no_crash(
         self, message_bus, redis_client,
@@ -546,7 +468,7 @@ class TestPassengerPickupEdgeCases:
             "station_id": "1",
             "passenger_id": "p_ghost",
         })
-        assert station._passenger_count == 0  # max(0, -1) = 0
+        assert station._passenger_count == 0
 
     async def test_missing_pickup_passenger_id_ignored(
         self, message_bus, redis_client,
@@ -554,13 +476,11 @@ class TestPassengerPickupEdgeCases:
         station = Station(message_bus, redis_client, "1")
         await station._handle_passenger_pickup({
             "station_id": "1",
-            # no passenger_id
+
         })
         assert station._passenger_count == 0
 
-
 class TestCargoLoadingEdgeCases:
-    """Loading of nonexistent cargo; count clamped to 0."""
 
     async def test_loading_nonexistent_no_crash(
         self, message_bus, redis_client,
@@ -578,18 +498,11 @@ class TestCargoLoadingEdgeCases:
         station = Station(message_bus, redis_client, "1")
         await station._handle_cargo_loading({
             "station_id": "1",
-            # no request_id
+
         })
         assert station._cargo_count == 0
 
-
-# ======================================================================
-# State snapshot resilience
-# ======================================================================
-
-
 class TestStateSnapshotResilience:
-    """Redis write failures don't crash the station."""
 
     async def test_snapshot_survives_redis_failure(
         self, message_bus, redis_client,
@@ -601,27 +514,20 @@ class TestStateSnapshotResilience:
 
         station._redis.set = failing_set
         await station._publish_state_snapshot()
-        # Station still functional
+
         assert station.status == StationStatus.OPERATIONAL
 
-
-# ======================================================================
-# Corrupt data resilience (StationClient-level)
-# ======================================================================
-
-
 class TestClaimCorruptData:
-    """Corrupt JSON in Redis queues is gracefully handled by StationClient."""
 
     async def test_corrupt_passenger_json_skipped(
         self, station_client, redis_client,
     ):
-        # Write corrupt data directly
+
         await redis_client.hset(
             "aexis:station:1:passengers", "p_corrupt", "{{not json}}"
         )
         pending = await station_client.get_pending_passengers("1")
-        # Should be empty (corrupt entry skipped)
+
         assert len(pending) == 0
 
     async def test_corrupt_cargo_json_skipped(

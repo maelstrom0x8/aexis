@@ -1,20 +1,3 @@
-"""State propagation tests with micro-transition assertions.
-
-Verifies that state changes made by pod and station components are
-visible through the same Redis layer that the API reads from.
-
-Architecture: component → _publish_state_snapshot → Redis → read
-The API layer reads these same Redis keys via scan_iter + json.loads;
-we replicate that logic here to avoid a fastapi/starlette dependency.
-
-Covers:
-- Pod state reflection: before/during/after pickup and delivery
-- Station state reflection: queue counts, congestion, processed metrics
-- Cross-component: pod delivery → both pod + station snapshots consistent
-- Corrupt data resilience in scan reads
-- Snapshot round-trip integrity: get_state() → Redis → read back identical
-- Incremental lifecycle: assertions at every micro-step in a flow
-"""
 
 import json
 from datetime import UTC, datetime
@@ -35,12 +18,6 @@ from aexis.tests.conftest import (
     make_passenger_pod,
 )
 
-
-# ======================================================================
-# Redis reader helpers (mirrors SystemAPI._get_all_*_states)
-# ======================================================================
-
-
 async def _read_pod_state(redis_client, pod_id: str) -> dict | None:
     raw = await redis_client.get(f"aexis:pod:{pod_id}:state")
     if raw is None:
@@ -49,7 +26,6 @@ async def _read_pod_state(redis_client, pod_id: str) -> dict | None:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-
 
 async def _read_all_pod_states(redis_client) -> dict[str, dict]:
     result = {}
@@ -65,7 +41,6 @@ async def _read_all_pod_states(redis_client) -> dict[str, dict]:
                     pass
     return result
 
-
 async def _read_station_state(redis_client, station_id: str) -> dict | None:
     raw = await redis_client.get(f"aexis:station:{station_id}:state")
     if raw is None:
@@ -74,7 +49,6 @@ async def _read_station_state(redis_client, station_id: str) -> dict | None:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-
 
 async def _read_all_station_states(redis_client) -> dict[str, dict]:
     result = {}
@@ -90,14 +64,7 @@ async def _read_all_station_states(redis_client) -> dict[str, dict]:
                     pass
     return result
 
-
-# ======================================================================
-# Pod state → Redis → read
-# ======================================================================
-
-
 class TestPodStateReflection:
-    """Pod snapshot written to Redis is readable via scan."""
 
     async def test_pod_state_before_and_after_pickup(
         self, message_bus, redis_client, station_client, network_context,
@@ -107,11 +74,9 @@ class TestPodStateReflection:
             pod_id="pod_test", station_id="1",
         )
 
-        # Before: no snapshot → key doesn't exist
         state = await _read_pod_state(redis_client, "pod_test")
         assert state is None
 
-        # Pod publishes initial snapshot (IDLE, 0 passengers)
         await pod._publish_state_snapshot()
 
         state = await _read_pod_state(redis_client, "pod_test")
@@ -119,11 +84,9 @@ class TestPodStateReflection:
         assert state["status"] == "idle"
         assert len(state.get("passengers", [])) == 0
 
-        # Pod picks up a passenger
         await async_seed_passenger(redis_client, "1", "p_snap", "2")
         await pod._execute_pickup("1")
 
-        # Micro-window: AFTER pickup, pod has passenger, status=EN_ROUTE
         await pod._publish_state_snapshot()
         state = await _read_pod_state(redis_client, "pod_test")
         assert state["status"] == "en_route"
@@ -142,7 +105,6 @@ class TestPodStateReflection:
              "pickup_time": datetime.now(UTC)},
         ]
 
-        # Intercept _publish_state_snapshot to capture the UNLOADING window
         snapshots_captured = []
         original_snapshot = pod._publish_state_snapshot
 
@@ -157,12 +119,10 @@ class TestPodStateReflection:
 
         await pod._execute_delivery("2")
 
-        # During unloading, snapshot should have been written with status=unloading
         assert len(snapshots_captured) == 1
         assert snapshots_captured[0]["status"] == "unloading"
-        assert snapshots_captured[0]["passenger_count"] == 1  # before removal
+        assert snapshots_captured[0]["passenger_count"] == 1
 
-        # After delivery completes, write final snapshot
         pod._publish_state_snapshot = original_snapshot
         await pod._publish_state_snapshot()
         state = await _read_pod_state(redis_client, "pod_unload")
@@ -176,7 +136,7 @@ class TestPodStateReflection:
             message_bus, redis_client, station_client,
             pod_id="pod_loc", station_id="1",
         )
-        # Simulate being on an edge
+
         pod.location_descriptor = LocationDescriptor(
             location_type="edge",
             edge_id="1->2",
@@ -187,7 +147,6 @@ class TestPodStateReflection:
         state = await _read_pod_state(redis_client, "pod_loc")
         assert "on edge" in state["location"]
 
-        # Arrive at station 2
         pod.location_descriptor = LocationDescriptor(
             location_type="station",
             node_id="2",
@@ -200,14 +159,7 @@ class TestPodStateReflection:
         assert state["location"] == "2"
         assert state["status"] == "idle"
 
-
-# ======================================================================
-# Station state → Redis → read
-# ======================================================================
-
-
 class TestStationStateReflection:
-    """Station snapshot reflects queue counts and congestion."""
 
     async def test_station_queue_after_single_arrival(
         self, message_bus, redis_client,
@@ -241,7 +193,6 @@ class TestStationStateReflection:
         assert state["queues"]["passengers"]["waiting"] == 3
         assert state["metrics"]["total_passengers_processed"] == 0
 
-        # Pick up 1 passenger
         await station._handle_passenger_pickup({
             "station_id": "1", "passenger_id": "p_0",
         })
@@ -260,7 +211,6 @@ class TestStationStateReflection:
         state = await _read_station_state(redis_client, "1")
         assert state["status"] == StationStatus.OPERATIONAL.value
 
-        # Drive congestion high
         station._passenger_count = 30
         station._cargo_count = 15
         station.available_bays = 0
@@ -271,26 +221,18 @@ class TestStationStateReflection:
         assert state["status"] == StationStatus.CONGESTED.value
         assert state["congestion_level"] > 0.7
 
-
-# ======================================================================
-# Cross-component propagation
-# ======================================================================
-
-
 class TestCrossComponentPropagation:
-    """Changes in one component are visible in another's state via Redis."""
 
     async def test_pod_delivery_updates_both_snapshots(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        # Station 2 has 1 passenger
+
         station = Station(message_bus, redis_client, "2")
         await station._handle_passenger_arrival({
             "station_id": "2", "passenger_id": "p_cross", "destination": "3",
         })
         await station._publish_state_snapshot()
 
-        # Pod delivers 1 passenger at station 2
         pod = make_passenger_pod(
             message_bus, redis_client, station_client,
             pod_id="pod_cross", station_id="2",
@@ -302,19 +244,16 @@ class TestCrossComponentPropagation:
         await pod._execute_delivery("2")
         await pod._publish_state_snapshot()
 
-        # Pod snapshot: 0 passengers
         pod_state = await _read_pod_state(redis_client, "pod_cross")
         assert pod_state["status"] == "en_route"
         assert len(pod_state.get("passengers", [])) == 0
 
-        # Station: passenger queue still has the OTHER passenger (p_cross)
         st_state = await _read_station_state(redis_client, "2")
         assert st_state["queues"]["passengers"]["waiting"] == 1
 
     async def test_inject_passenger_reflects_in_station_queue(
         self, message_bus, redis_client,
     ):
-        """Simulate the event chain: publish event → station handler → snapshot."""
         station = Station(message_bus, redis_client, "1")
         await station._publish_state_snapshot()
 
@@ -349,8 +288,7 @@ class TestCrossComponentPropagation:
     async def test_system_aggregation_across_pods_and_stations(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Two pods with passengers + station with waiters → aggregation correct."""
-        # Pod 1: 2 passengers
+
         pod1 = make_passenger_pod(
             message_bus, redis_client, station_client,
             pod_id="pod_agg_1", station_id="1",
@@ -362,7 +300,6 @@ class TestCrossComponentPropagation:
         pod1.status = PodStatus.EN_ROUTE
         await pod1._publish_state_snapshot()
 
-        # Pod 2: 1 passenger
         pod2 = make_passenger_pod(
             message_bus, redis_client, station_client,
             pod_id="pod_agg_2", station_id="2",
@@ -373,15 +310,13 @@ class TestCrossComponentPropagation:
         pod2.status = PodStatus.EN_ROUTE
         await pod2._publish_state_snapshot()
 
-        # Station 1: 3 waiting passengers
         station = Station(message_bus, redis_client, "1")
         station._passenger_count = 3
         await station._publish_state_snapshot()
 
-        # Aggregate reads
         pods = await _read_all_pod_states(redis_client)
         total_onboard = sum(len(p.get("passengers", [])) for p in pods.values())
-        assert total_onboard == 3  # 2 + 1
+        assert total_onboard == 3
 
         en_route_count = sum(1 for p in pods.values() if p.get("status") == "en_route")
         assert en_route_count == 2
@@ -396,7 +331,6 @@ class TestCrossComponentPropagation:
     async def test_metrics_accumulate(
         self, message_bus, redis_client,
     ):
-        """Station processes passengers → total_passengers_processed increments."""
         station = Station(message_bus, redis_client, "1")
 
         for i in range(5):
@@ -412,14 +346,7 @@ class TestCrossComponentPropagation:
         state = await _read_station_state(redis_client, "1")
         assert state["metrics"]["total_passengers_processed"] == 5
 
-
-# ======================================================================
-# Redis scan resilience
-# ======================================================================
-
-
 class TestScanResilience:
-    """Corrupt or malformed keys are skipped by the scan helpers."""
 
     async def test_corrupt_pod_json_skipped(self, redis_client):
         await redis_client.set("aexis:pod:bad:state", "{{{invalid")
@@ -450,14 +377,7 @@ class TestScanResilience:
         state = await _read_station_state(redis_client, "nonexistent")
         assert state is None
 
-
-# ======================================================================
-# Snapshot round-trip integrity
-# ======================================================================
-
-
 class TestSnapshotRoundTrip:
-    """Verify that get_state() → Redis → read back produces identical data."""
 
     async def test_pod_roundtrip_integrity(
         self, message_bus, redis_client, station_client, network_context,
@@ -500,24 +420,13 @@ class TestSnapshotRoundTrip:
         assert redis_state["queues"]["cargo"]["waiting"] == 3
         assert redis_state["metrics"]["total_passengers_processed"] == 12
 
-
-# ======================================================================
-# Incremental state propagation chain
-# ======================================================================
-
-
 class TestIncrementalStatePropagation:
-    """Verify state at each step in a multi-mutation chain."""
 
     async def test_passenger_lifecycle_state_propagation(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Full lifecycle: station arrival → pod pickup → pod delivery →
-        both snapshots reflect each micro-step.
-        """
         station = Station(message_bus, redis_client, "1")
 
-        # Step 1: Passenger arrives at station
         await station._handle_passenger_arrival({
             "station_id": "1", "passenger_id": "p_lc", "destination": "2",
         })
@@ -527,7 +436,6 @@ class TestIncrementalStatePropagation:
         assert st_state["queues"]["passengers"]["waiting"] == 1
         assert st_state["metrics"]["total_passengers_processed"] == 0
 
-        # Step 2: Pod docks and picks up the passenger
         pod = make_passenger_pod(
             message_bus, redis_client, station_client,
             pod_id="pod_lc", station_id="1",
@@ -539,7 +447,6 @@ class TestIncrementalStatePropagation:
         assert pod_state["status"] == "en_route"
         assert len(pod_state["passengers"]) == 1
 
-        # Station processed count updates after pickup
         await station._handle_passenger_pickup({
             "station_id": "1", "passenger_id": "p_lc",
         })
@@ -549,7 +456,6 @@ class TestIncrementalStatePropagation:
         assert st_state["queues"]["passengers"]["waiting"] == 0
         assert st_state["metrics"]["total_passengers_processed"] == 1
 
-        # Step 3: Pod delivers at station 2
         await pod._execute_delivery("2")
         await pod._publish_state_snapshot()
 
@@ -562,7 +468,6 @@ class TestIncrementalStatePropagation:
     ):
         station = Station(message_bus, redis_client, "1")
 
-        # Step 1: Cargo request arrives at station
         await station._handle_cargo_request({
             "origin": "1", "request_id": "c_lc", "destination": "3", "weight": 100.0,
         })
@@ -571,7 +476,6 @@ class TestIncrementalStatePropagation:
         st_state = await _read_station_state(redis_client, "1")
         assert st_state["queues"]["cargo"]["waiting"] == 1
 
-        # Step 2: Pod loads cargo
         pod = make_cargo_pod(
             message_bus, redis_client, station_client,
             pod_id="pod_clc", station_id="1",
@@ -584,7 +488,6 @@ class TestIncrementalStatePropagation:
         assert len(pod_state.get("cargo", [])) == 1
         assert pod_state["cargo"][0]["request_id"] == "c_lc"
 
-        # Step 3: Pod delivers at station 3
         await pod._execute_delivery("3")
         await pod._publish_state_snapshot()
 

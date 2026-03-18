@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-"""AEXIS Microservices Launcher (Python Version)
-
-Replaces launch.sh with a more robust process management system.
-Features:
-- Centralized process tracking
-- Graceful shutdown handling (SIGTERM -> Wait -> SIGKILL)
-- Port validation for API and Web services
-- Redis connectivity check
-- Automatic venv detection and activation
-"""
 
 import asyncio
 import json
@@ -22,7 +12,6 @@ import time
 from pathlib import Path
 from typing import List, Optional
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -37,7 +26,6 @@ class AexisLauncher:
         self.processes: List[subprocess.Popen] = []
         self.shutting_down = False
 
-        # Configuration (from env or defaults)
         print(f"Loading configuration from environment...")
         self.redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
         self.redis_password = os.getenv("REDIS_PASSWORD", "password")
@@ -52,7 +40,6 @@ class AexisLauncher:
             return s.connect_ex(('localhost', port)) != 0
 
     def _check_redis(self) -> bool:
-        """Check if Redis is reachable and authenticated."""
         try:
             import redis
             from urllib.parse import urlparse
@@ -63,7 +50,7 @@ class AexisLauncher:
                 password=self.redis_password,
                 socket_connect_timeout=2
             )
-            # Flush all legacy data before starting
+
             r.flushall()
             return r.ping()
         except ImportError:
@@ -83,10 +70,10 @@ class AexisLauncher:
         if not Path(self.network_path).exists():
             logger.error(f"Network file not found: {self.network_path}")
             return []
-        
+
         with open(self.network_path) as f:
             data = json.load(f)
-        
+
         station_ids = []
         for node in data.get("nodes", []):
             station_ids.append(str(node.get("id")))
@@ -95,7 +82,7 @@ class AexisLauncher:
     def launch_process(self, module: str, args: List[str], name: str):
         python_cmd = self._get_python_cmd()
         cmd = [python_cmd, "-m", module] + args
-        
+
         env = os.environ.copy()
         env["PYTHONPATH"] = str(self.project_root)
         env["REDIS_URL"] = self.redis_url
@@ -103,12 +90,12 @@ class AexisLauncher:
         env["AEXIS_NETWORK_DATA"] = self.network_path
 
         try:
-            # We don't want to use shell=True to keep better control over PIDs
+
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(self.aexis_root),
                 env=env,
-                stdout=subprocess.DEVNULL, # Logs are handled by the modules internally
+                stdout=subprocess.DEVNULL,
                 stderr=subprocess.STDOUT
             )
             self.processes.append(proc)
@@ -121,29 +108,26 @@ class AexisLauncher:
             return
         self.shutting_down = True
         logger.info("\nShutting down all services...")
-        
-        # Send SIGTERM to all
+
         for proc in self.processes:
             if proc.poll() is None:
                 proc.terminate()
-        
-        # Wait for processes to exit
+
         start_wait = time.time()
         while time.time() - start_wait < 5:
             if all(proc.poll() is not None for proc in self.processes):
                 break
             time.sleep(0.1)
-        
-        # Force kill any survivors
+
         for proc in self.processes:
             if proc.poll() is None:
                 logger.warning(f"Process {proc.pid} didn't stop in time, killing...")
                 proc.kill()
-        
+
         logger.info("All services stopped.")
 
     def run(self):
-        # 1. Validation
+
         if not self._is_port_available(self.api_port):
             logger.error(f"Port {self.api_port} (API) is already in use.")
             return
@@ -154,11 +138,9 @@ class AexisLauncher:
             logger.error("Redis check failed. Ensure Redis is running and password is correct.")
             return
 
-        # 2. Setup signals
         for sig in (signal.SIGINT, signal.SIGTERM):
             signal.signal(sig, lambda *_: self.shutdown())
 
-        # 3. Launch Stations
         station_ids = self._get_station_ids()
         logger.info(f"Starting {len(station_ids)} stations...")
         for i, sid in enumerate(station_ids):
@@ -173,7 +155,6 @@ class AexisLauncher:
         logger.info("Waiting for stations to initialize...")
         time.sleep(3)
 
-        # 4. Launch Pods
         cargo_count = (self.pod_count * self.cargo_ratio) // 100
         passenger_count = self.pod_count - cargo_count
 
@@ -204,7 +185,6 @@ class AexisLauncher:
 
         time.sleep(2)
 
-        # 5. Launch API and Web
         logger.info(f"Starting API on port {self.api_port}...")
         self.launch_process("aexis.api.main", [], "API")
 
@@ -218,7 +198,6 @@ class AexisLauncher:
         logger.info("="*43 + "\n")
         logger.info("Press Ctrl+C to stop.")
 
-        # 6. Monitor
         try:
             while not self.shutting_down:
                 time.sleep(1)

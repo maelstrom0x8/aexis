@@ -1,8 +1,3 @@
-"""Unit tests for Station Redis queue operations.
-
-Tests passenger/cargo addition, pickup removal, state snapshot accuracy,
-and congestion level calculation.
-"""
 
 import json
 
@@ -12,9 +7,7 @@ from aexis.core.message_bus import MessageBus
 from aexis.core.model import Priority, StationStatus
 from aexis.station import Station
 
-
 class TestPassengerQueue:
-    """Passenger queue operations via Redis."""
 
     async def test_passenger_arrival_writes_to_redis(
         self, message_bus, redis_client
@@ -56,14 +49,12 @@ class TestPassengerQueue:
     ):
         station = Station(message_bus, redis_client, "1")
 
-        # Add passenger
         await station._handle_passenger_arrival({
             "station_id": "1",
             "passenger_id": "p_001",
             "destination": "2",
         })
 
-        # Pickup
         await station._handle_passenger_pickup({
             "station_id": "1",
             "passenger_id": "p_001",
@@ -93,7 +84,6 @@ class TestPassengerQueue:
         )
         assert count == 5
 
-        # Pick up just one
         await station._handle_passenger_pickup({
             "station_id": "1",
             "passenger_id": "p_002",
@@ -104,9 +94,7 @@ class TestPassengerQueue:
         )
         assert remaining == 4
 
-
 class TestCargoQueue:
-    """Cargo queue operations via Redis."""
 
     async def test_cargo_request_writes_to_redis(
         self, message_bus, redis_client
@@ -149,9 +137,7 @@ class TestCargoQueue:
         assert remaining == 0
         assert station.total_cargo_processed == 1
 
-
 class TestCongestionLevel:
-    """Congestion calculation and threshold behavior."""
 
     async def test_congestion_increases_with_queue(
         self, message_bus, redis_client
@@ -166,9 +152,6 @@ class TestCongestionLevel:
                 "destination": "2",
             })
 
-        # 15 passengers / 20 max = 0.75 * 0.4 (weight) = 0.3 contribution
-        # Plus bay utilization: all 4 bays free = 0 * 0.3 = 0
-        # Total ~0.3
         assert station.congestion_level > 0.2
 
     async def test_congestion_threshold_changes_status(
@@ -176,7 +159,6 @@ class TestCongestionLevel:
     ):
         station = Station(message_bus, redis_client, "1")
 
-        # Flood with passengers and cargo to push congestion > 0.8
         for i in range(25):
             await station._handle_passenger_arrival({
                 "station_id": "1",
@@ -190,7 +172,7 @@ class TestCongestionLevel:
                 "destination": "3",
                 "weight": 10.0,
             })
-            
+
         station.available_bays = 0
         station._update_congestion_level()
 
@@ -201,15 +183,13 @@ class TestCongestionLevel:
     ):
         station = Station(message_bus, redis_client, "1")
         station.loading_bays = 4
-        station.available_bays = 0  # All bays occupied
+        station.available_bays = 0
 
         station._update_congestion_level()
-        # Bay utilization: 1.0 * 0.3 = 0.3
+
         assert station.congestion_level >= 0.3
 
-
 class TestStateSnapshot:
-    """State snapshot written to Redis for API reads."""
 
     async def test_state_written_to_redis(self, message_bus, redis_client):
         station = Station(message_bus, redis_client, "1")

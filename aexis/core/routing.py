@@ -19,39 +19,29 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 class Router(abc.ABC):
-    """Abstract base for all routing strategies - consistent async interface (LSP compliant)"""
 
     @abc.abstractmethod
     async def route(self, context: DecisionContext) -> Route:
-        """Route request. All implementations must be async for consistent interface."""
         pass
 
-
 class RoutingStrategy(abc.ABC):
-    """Strategy for route optimization (SRP: route calculation only)"""
 
     @abc.abstractmethod
     def calculate_optimal_route(self, context: DecisionContext) -> dict:
-        """Calculate optimal route. Returns dict with route, duration, distance, confidence."""
         pass
 
-
 class RoutingProvider:
-    """Manages fallback chain of routers (SRP: delegation only)"""
 
     def __init__(self) -> None:
         self._routers: list[Router] = []
 
     def add_router(self, router: Router) -> None:
-        """Add router to fallback chain"""
         if not isinstance(router, Router):
             raise TypeError(f"Expected Router, got {type(router)}")
         self._routers.append(router)
 
     async def route(self, context: DecisionContext) -> Route:
-        """Get route by trying routers in order (DRY: async/sync consistent)"""
         if not self._routers:
             raise ValueError("No routers configured")
 
@@ -61,7 +51,7 @@ class RoutingProvider:
                 if route:
                     return route
             except ConnectionError as e:
-                # Recoverable: connection issue, try next router
+
                 logger.warning(
                     f"Router {router.__class__.__name__} connection failed (will try next): {e}",
                     extra={
@@ -71,7 +61,7 @@ class RoutingProvider:
                 )
                 continue
             except TimeoutError as e:
-                # Recoverable: timeout, try next router
+
                 logger.warning(
                     f"Router {router.__class__.__name__} timeout (will try next): {e}",
                     extra={
@@ -81,7 +71,7 @@ class RoutingProvider:
                 )
                 continue
             except Exception as e:
-                # Other errors: log but continue fallback chain
+
                 logger.warning(
                     f"Router {router.__class__.__name__} failed: {e}",
                     extra={
@@ -94,36 +84,29 @@ class RoutingProvider:
 
         raise ValueError("All routing strategies failed")
 
-
 class OfflineRoutingStrategy(RoutingStrategy):
-    """Route calculation using offline algorithm (SRP: calculation only, no AI)"""
 
     def __init__(self, network_context: NetworkContext | None = None):
-        # Dependency injection - can be tested with mock NetworkContext
+
         self.network_context = network_context or NetworkContext.get_instance()
 
     def calculate_optimal_route(self, context: DecisionContext) -> dict:
-        """Calculate optimal route using TSP approximation"""
-        # Fix: Consider passengers/cargo as active tasks
-        # If no requests AND no onboard payload, then patrol
+
         has_payload = bool(context.passengers) or bool(context.cargo)
         if not context.available_requests and not has_payload:
-            # No requests and no payload: remain idle at current station
+
             return self._get_idle_route(context.current_location)
 
-        # Get valid destinations based on pod type
         destinations = self._extract_destinations(context)
 
         if not destinations:
-            # Still no destinations: remain idle
+
             return self._get_idle_route(context.current_location)
 
-        # Solve TSP
         optimal_route = self._solve_traveling_salesman(
             context.current_location, list(destinations)
         )
 
-        # Calculate metrics
         total_distance = self.network_context.get_route_distance(optimal_route)
         estimated_duration = self._estimate_travel_time(
             total_distance, context.network_state
@@ -137,10 +120,8 @@ class OfflineRoutingStrategy(RoutingStrategy):
         }
 
     def _extract_destinations(self, context: DecisionContext) -> set:
-        """Extract valid destinations from available requests (SRP: filtering logic)"""
         destinations = set()
 
-        # Determine pod type from capacity constraints
         is_passenger_pod = (
             context.capacity_available >= 0 and context.weight_available == 0
         )
@@ -149,7 +130,6 @@ class OfflineRoutingStrategy(RoutingStrategy):
         for req in context.available_requests:
             req_type = req.get("type")
 
-            # Validate request matches pod type
             if is_passenger_pod and req_type != "passenger":
                 continue
             if is_cargo_pod and req_type != "cargo":
@@ -159,50 +139,39 @@ class OfflineRoutingStrategy(RoutingStrategy):
             destination = req.get("destination")
 
             if origin and origin != context.current_location:
-                # Request is at a different station — route there for pickup
+
                 destinations.add(origin)
             elif origin == context.current_location and destination:
-                # Pod is already at the pickup station. Pickup will happen
-                # before departure (in _execute_decision), so route directly
-                # to the delivery destination.
+
                 destinations.add(destination)
 
-        # Add destinations of current passengers (payload already onboard)
         if context.passengers:
             for p in context.passengers:
                 dest = p.get("destination")
                 if dest and dest != context.current_location:
                     destinations.add(dest)
 
-        # Add destinations of current cargo (payload already onboard)
         if context.cargo:
             for c in context.cargo:
                 dest = c.get("destination")
                 if dest and dest != context.current_location:
                     destinations.add(dest)
-    
+
         return destinations
 
     def _solve_traveling_salesman(
         self, start: str, destinations: list[str]
     ) -> list[str]:
-        """Nearest-neighbor TSP approximation (Truncated to first stop)
-        
-        Note: To ensure the pod stops at every pickup/delivery point, we only 
-        calculate the path to the FIRST nearest destination. The pod will 
-        re-decide upon arrival.
-        """
         if not destinations:
             return [start]
 
         current = start
         unvisited = destinations.copy()
-        
-        # Find the nearest destination
+
         nearest = self._find_nearest_station(current, unvisited)
-        
+
         try:
-            # Return path only to that first stop
+
             path = nx.shortest_path(
                 self.network_context.network_graph,
                 current,
@@ -211,11 +180,10 @@ class OfflineRoutingStrategy(RoutingStrategy):
             )
             return path
         except (nx.NetworkXNoPath, nx.NodeNotFound):
-            # Fallback for disconnected graph
+
             return [start, nearest]
 
     def _find_nearest_station(self, current: str, candidates: list[str]) -> str:
-        """Find nearest station from candidates"""
         if not candidates:
             return current
 
@@ -231,7 +199,6 @@ class OfflineRoutingStrategy(RoutingStrategy):
         return nearest
 
     def _get_idle_route(self, current_location: str) -> dict:
-        """Get idle route. Idle pods remain at their current station."""
         return {
             "route": [current_location],
             "duration": 0,
@@ -240,23 +207,19 @@ class OfflineRoutingStrategy(RoutingStrategy):
         }
 
     def _estimate_travel_time(self, distance: float, network_state: dict) -> int:
-        """Estimate travel time in minutes"""
-        base_speed = 50.0  # units per minute
+        base_speed = 50.0
         congestion_factor = network_state.get("avg_congestion", 0.0)
         adjusted_speed = base_speed * (1.0 - congestion_factor * 0.5)
         travel_time = distance / adjusted_speed if adjusted_speed > 0 else 0
         return int(round(travel_time))
 
-
 class OfflineRouter(Router):
-    """Offline routing algorithm for fallback decision making"""
 
     def __init__(self, network_context: NetworkContext = None):
-        # Use provided NetworkContext or fall back to singleton for backward compatibility
+
         self.network_context = network_context or NetworkContext.get_instance()
 
     async def route(self, context: DecisionContext) -> Route:
-        """Get route using offline strategy (LSP: async interface)"""
         strategy = OfflineRoutingStrategy(self.network_context)
         result = strategy.calculate_optimal_route(context)
         return Route(
@@ -266,9 +229,7 @@ class OfflineRouter(Router):
             distance=result["distance"],
         )
 
-
 class AIDecisionEngine:
-    """Encapsulates AI decision making logic (SRP: AI decisions only)"""
 
     def __init__(self, ai_provider: AIProvider, pod_id: str):
         self.ai_provider = ai_provider
@@ -278,7 +239,6 @@ class AIDecisionEngine:
         self.decision_history: list[Decision] = []
 
     async def make_decision(self, context: DecisionContext) -> Decision:
-        """Make routing decision using AI"""
         if not self._should_use_ai():
             raise ValueError("AI unavailable - use fallback")
 
@@ -291,11 +251,9 @@ class AIDecisionEngine:
             raise
 
     def _should_use_ai(self) -> bool:
-        """Determine if AI should be used"""
         if not self.ai_provider or not self.ai_provider.is_available():
             return False
 
-        # Check if we should retry after previous failure
         if self.last_failure:
             retry_window = timedelta(minutes=30)
             if datetime.now(UTC) - self.last_failure < retry_window:
@@ -304,25 +262,21 @@ class AIDecisionEngine:
         return True
 
     def _record_success(self, decision: Decision) -> None:
-        """Record successful decision"""
         decision.timestamp = datetime.now(UTC)
         self.decision_history.append(decision)
-        # Keep only last 100 decisions
+
         if len(self.decision_history) > 100:
             self.decision_history = self.decision_history[-50:]
-        # Reset failure tracking
+
         self.failure_count = 0
         self.last_failure = None
 
     def _record_failure(self, error: Exception) -> None:
-        """Record AI failure"""
         self.failure_count += 1
         self.last_failure = datetime.now(UTC)
         logger.warning(f"AI decision failed for pod {self.pod_id}: {error}")
 
-
 class AIRouter(Router):
-    """Router using AI with offline fallback (LSP: consistent async interface)"""
 
     def __init__(
         self,
@@ -330,25 +284,16 @@ class AIRouter(Router):
         ai_provider: AIProvider | None = None,
         fallback_strategy: RoutingStrategy | None = None,
     ):
-        """Initialize with dependency injection (DIP compliant)
-
-        Args:
-            pod_id: Pod identifier
-            ai_provider: AI provider for decisions (optional, will use MockAIProvider if None)
-            fallback_strategy: Fallback routing strategy if AI fails
-        """
         self.pod_id = pod_id
         self.ai_provider = ai_provider or MockAIProvider()
         self.fallback_strategy = fallback_strategy or OfflineRoutingStrategy()
         self.decision_engine = AIDecisionEngine(self.ai_provider, pod_id)
 
     async def route(self, context: DecisionContext) -> Route:
-        """Get route using AI with offline fallback, enforcing payload drop-offs"""
         try:
             decision = await self.decision_engine.make_decision(context)
             route_stations = decision.route
-            
-            # Enforce drop-offs for onboard payload
+
             mandatory_destinations = set()
             if context.passengers:
                 for p in context.passengers:
@@ -360,12 +305,11 @@ class AIRouter(Router):
                     dest = c.get("destination")
                     if dest and dest != context.current_location:
                         mandatory_destinations.add(dest)
-            
-            # Inject missing destinations into AI route
+
             for dest in mandatory_destinations:
                 if dest not in route_stations:
                     route_stations.append(dest)
-                    
+
             route_data = {
                 "route": route_stations,
                 "duration": decision.estimated_duration,
@@ -375,7 +319,7 @@ class AIRouter(Router):
             logger.debug(
                 f"AI routing failed for pod {self.pod_id}, using fallback: {e}"
             )
-            # Fallback to offline routing (which already guarantees drop-offs)
+
             route_data = self.fallback_strategy.calculate_optimal_route(context)
 
         return Route(
@@ -385,4 +329,3 @@ class AIRouter(Router):
             distance=route_data.get("distance", 0.0),
         )
 
-    # Note: _build_ai_prompt moved to AIProvider where it belongs

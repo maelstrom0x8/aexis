@@ -1,7 +1,3 @@
-"""Unit tests for the Gradient AI provider layer.
-
-All tests use mocked HTTP — no real Gradient Agent calls.
-"""
 
 import json
 import os
@@ -17,13 +13,7 @@ from aexis.core.ai_provider import (
 from aexis.core.errors import GradientException
 from aexis.core.model import DecisionContext
 
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
 def _make_context(**overrides) -> DecisionContext:
-    """Build a minimal DecisionContext for testing."""
     defaults = dict(
         pod_id="pod_test_01",
         current_location="1",
@@ -49,13 +39,11 @@ def _make_context(**overrides) -> DecisionContext:
     defaults.update(overrides)
     return DecisionContext(**defaults)
 
-
 def _agent_response_body(
     content: str,
     include_retrieval: bool = False,
     include_guardrails: bool = False,
 ) -> dict:
-    """Build a fake agent response body."""
     body = {
         "id": "chatcmpl-test",
         "choices": [
@@ -85,7 +73,6 @@ def _agent_response_body(
         }
     return body
 
-
 _VALID_DECISION_JSON = json.dumps({
     "accepted_requests": ["p_001"],
     "rejected_requests": [],
@@ -95,22 +82,14 @@ _VALID_DECISION_JSON = json.dumps({
     "reasoning": "Route to pickup at station 2, deliver at station 3",
 })
 
-
 @pytest.fixture
 def provider():
-    """Create a GradientAIProvider with a dummy endpoint."""
     return GradientAIProvider(
         agent_endpoint="https://agent.example.com",
         agent_access_key="test-key-123",
     )
 
-
-# ---------------------------------------------------------------------------
-# GradientAIProvider — prompt construction
-# ---------------------------------------------------------------------------
-
 class TestPromptConstruction:
-    """The prompt sent to the agent must contain key context fields."""
 
     def test_prompt_contains_pod_id(self, provider):
         ctx = _make_context(pod_id="pod_alpha")
@@ -134,13 +113,7 @@ class TestPromptConstruction:
         prompt = provider._build_prompt(ctx)
         assert "p_onboard" in prompt
 
-
-# ---------------------------------------------------------------------------
-# GradientAIProvider — response parsing
-# ---------------------------------------------------------------------------
-
 class TestResponseParsing:
-    """Agent response parsing handles clean JSON, markdown fences, and noise."""
 
     def test_clean_json_response(self, provider):
         ctx = _make_context()
@@ -191,7 +164,7 @@ class TestResponseParsing:
         ctx = _make_context()
         incomplete = json.dumps({
             "accepted_requests": [],
-            # missing "rejected_requests", "route", etc.
+
         })
         body = _agent_response_body(incomplete)
         with pytest.raises(GradientException):
@@ -209,7 +182,7 @@ class TestResponseParsing:
         })
         body = _agent_response_body(decision_json)
         decision = provider._parse_response(body, ctx)
-        # Empty route should be filled with current location
+
         assert decision.route == ["station_5"]
 
     def test_confidence_clamped_to_0_1(self, provider):
@@ -236,16 +209,9 @@ class TestResponseParsing:
             provider._log_platform_metadata(body, ctx.pod_id)
         assert "RAG retrieved 1 source(s)" in caplog.text
 
-
-# ---------------------------------------------------------------------------
-# GradientAIProvider — retry logic
-# ---------------------------------------------------------------------------
-
 class TestRetryLogic:
-    """Agent HTTP call retries on transient failures."""
 
     async def test_retries_on_timeout(self, provider, monkeypatch):
-        """Should retry on httpx.TimeoutException and eventually raise."""
         call_count = 0
 
         async def mock_post(*args, **kwargs):
@@ -259,10 +225,9 @@ class TestRetryLogic:
         with pytest.raises(GradientException):
             await provider.make_decision(ctx)
 
-        assert call_count == 3  # 3 retries
+        assert call_count == 3
 
     async def test_retries_on_connect_error(self, provider, monkeypatch):
-        """Should retry on httpx.ConnectError."""
         call_count = 0
 
         async def mock_post(*args, **kwargs):
@@ -279,7 +244,6 @@ class TestRetryLogic:
         assert call_count == 3
 
     async def test_succeeds_after_transient_failure(self, provider, monkeypatch):
-        """Should succeed if a retry works."""
         call_count = 0
 
         async def mock_post(*args, **kwargs):
@@ -302,7 +266,6 @@ class TestRetryLogic:
         assert decision.route == ["1", "2", "3"]
 
     async def test_rate_limit_raises_immediately(self, provider, monkeypatch):
-        """429 should raise without retrying."""
         call_count = 0
 
         async def mock_post(*args, **kwargs):
@@ -321,11 +284,6 @@ class TestRetryLogic:
             await provider.make_decision(ctx)
 
         assert call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# MockAIProvider
-# ---------------------------------------------------------------------------
 
 class TestMockAIProvider:
 
@@ -348,11 +306,6 @@ class TestMockAIProvider:
     def test_is_always_available(self):
         mock = MockAIProvider()
         assert mock.is_available() is True
-
-
-# ---------------------------------------------------------------------------
-# AIProviderFactory
-# ---------------------------------------------------------------------------
 
 class TestAIProviderFactory:
 
@@ -384,11 +337,6 @@ class TestAIProviderFactory:
     def test_invalid_type_raises(self):
         with pytest.raises(Exception):
             AIProviderFactory.create_provider("openai")
-
-
-# ---------------------------------------------------------------------------
-# GuardrailConfig
-# ---------------------------------------------------------------------------
 
 class TestGuardrailConfig:
 

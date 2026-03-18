@@ -1,16 +1,3 @@
-"""Station service — runs as a standalone process managing passenger and cargo queues.
-
-Each station maintains its queue state in Redis hashes and reacts to events via
-Redis pub/sub. Claims are handled atomically so multiple pod processes can race
-safely.
-
-Redis key layout (owned by this station instance):
-  aexis:station:{id}:passengers        — HASH: passenger_id → JSON
-  aexis:station:{id}:cargo             — HASH: request_id → JSON
-  aexis:station:{id}:claims:passengers — HASH: passenger_id → pod_id
-  aexis:station:{id}:claims:cargo      — HASH: request_id → pod_id
-  aexis:station:{id}:state             — STRING: JSON state snapshot
-"""
 
 import asyncio
 import json
@@ -32,28 +19,21 @@ from aexis.core.model import (
 
 logger = logging.getLogger(__name__)
 
-
 def _passengers_key(station_id: str) -> str:
     return f"aexis:station:{station_id}:passengers"
-
 
 def _cargo_key(station_id: str) -> str:
     return f"aexis:station:{station_id}:cargo"
 
-
 def _passenger_claims_key(station_id: str) -> str:
     return f"aexis:station:{station_id}:claims:passengers"
-
 
 def _cargo_claims_key(station_id: str) -> str:
     return f"aexis:station:{station_id}:claims:cargo"
 
-
 def _state_key(station_id: str) -> str:
     return f"aexis:station:{station_id}:state"
 
-
-# Lua script: atomically claim an item only if it exists in the queue and is unclaimed.
 _CLAIM_LUA = """
 local queue_key = KEYS[1]
 local claims_key = KEYS[2]
@@ -66,14 +46,7 @@ end
 return redis.call('HSETNX', claims_key, item_id, pod_id)
 """
 
-
 class Station:
-    """Transportation station with Redis-backed queue management.
-
-    Subscribes to passenger/cargo/pod/system events via the MessageBus and
-    writes all queue state to Redis hashes so pod processes in other
-    OS processes can query and claim items through StationClient.
-    """
 
     def __init__(
         self,
@@ -88,45 +61,32 @@ class Station:
         self.status = StationStatus.OPERATIONAL
         self.loading_bays = 4
         self.available_bays = 4
-        self.processing_rate = 2.5  # passengers/minute
+        self.processing_rate = 2.5
         self.connected_stations: list[str] = []
         self.congestion_level = 0.0
 
-        # Metrics
         self.total_passengers_processed = 0
         self.total_cargo_processed = 0
         self.average_wait_time = 0.0
         self.max_wait_time = 0.0
 
-        # Cached local counts for congestion calculations (avoid round-tripping
-        # to Redis on every event just for a length check).
         self._passenger_count = 0
         self._cargo_count = 0
 
         self._claim_script = self._redis.register_script(_CLAIM_LUA)
         self._running = False
 
-    # ------------------------------------------------------------------
-    # Lifecycle
-    # ------------------------------------------------------------------
-
     async def start(self):
-        """Subscribe to event channels and begin processing."""
         self._running = True
         await self._setup_subscriptions()
-        # Publish initial state so the API can discover this station
+
         await self._publish_state_snapshot()
         logger.info(f"Station {self.station_id} started")
 
     async def stop(self):
-        """Unsubscribe and clean up."""
         self._running = False
         await self._cleanup_subscriptions()
         logger.info(f"Station {self.station_id} stopped")
-
-    # ------------------------------------------------------------------
-    # Subscriptions
-    # ------------------------------------------------------------------
 
     async def _setup_subscriptions(self):
         self.message_bus.subscribe(
@@ -155,10 +115,6 @@ class Station:
         self.message_bus.unsubscribe(
             MessageBus.CHANNELS["SYSTEM_COMMANDS"], self._handle_system_command
         )
-
-    # ------------------------------------------------------------------
-    # Event handlers
-    # ------------------------------------------------------------------
 
     async def _handle_passenger_event(self, data: dict):
         try:
@@ -197,7 +153,6 @@ class Station:
             )
 
     async def _handle_pod_event(self, data: dict):
-        """Manage loading bay availability based on pod arrivals/departures."""
         try:
             message = data.get("message", {})
             event_type = message.get("event_type", "")
@@ -236,10 +191,6 @@ class Station:
             logger.debug(
                 f"Station {self.station_id} command error: {e}", exc_info=True
             )
-
-    # ------------------------------------------------------------------
-    # Passenger operations
-    # ------------------------------------------------------------------
 
     async def _handle_passenger_arrival(self, event_data: dict):
         station_id = event_data.get("station_id")
@@ -282,7 +233,6 @@ class Station:
         if not passenger_id:
             return
 
-        # Remove from queue and claims
         await self._redis.hdel(_passengers_key(self.station_id), passenger_id)
         await self._redis.hdel(
             _passenger_claims_key(self.station_id), passenger_id
@@ -293,15 +243,9 @@ class Station:
         await self._publish_state_snapshot()
 
     async def _handle_passenger_delivery(self, event_data: dict):
-        """Passengers delivered TO this station — just update metrics."""
         station_id = event_data.get("station_id")
         if station_id != self.station_id:
             return
-        # Delivery at this station is informational; no queue mutation needed.
-
-    # ------------------------------------------------------------------
-    # Cargo operations
-    # ------------------------------------------------------------------
 
     async def _handle_cargo_request(self, event_data: dict):
         origin = event_data.get("origin")
@@ -361,11 +305,6 @@ class Station:
         station_id = event_data.get("station_id")
         if station_id != self.station_id:
             return
-        # Delivery at this station is informational.
-
-    # ------------------------------------------------------------------
-    # Capacity / congestion
-    # ------------------------------------------------------------------
 
     async def _handle_capacity_update(self, data: dict):
         try:
@@ -437,12 +376,7 @@ class Station:
             f"level {self.congestion_level:.2f}"
         )
 
-    # ------------------------------------------------------------------
-    # State snapshot
-    # ------------------------------------------------------------------
-
     async def _publish_state_snapshot(self):
-        """Write full station state to a Redis key for API/UI reads."""
         state = self.get_state()
         try:
             await self._redis.set(

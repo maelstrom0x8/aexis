@@ -22,9 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 class AexisJSONEncoder(json.JSONEncoder):
-    """Custom JSON encoder for Aexis models (handles datetime, Enum, etc.)"""
     def default(self, obj):
         if isinstance(obj, datetime):
             return obj.strftime('%Y-%m-%d %H:%M:%S')
@@ -32,9 +30,7 @@ class AexisJSONEncoder(json.JSONEncoder):
             return obj.value
         return super().default(obj)
 
-
 class MessageBus:
-    """Redis-based message bus for event-driven communication"""
 
     def __init__(
         self, redis_url: str = "redis://localhost:6379", password: str | None = None
@@ -47,7 +43,6 @@ class MessageBus:
         self.running = False
 
     async def connect(self) -> bool:
-        """Initialize Redis connection"""
         try:
             self.redis_client = redis.from_url(
                 self.redis_url,
@@ -58,10 +53,8 @@ class MessageBus:
                 retry_on_timeout=True,
             )
 
-            # Test connection
             await self.redis_client.ping()
 
-            # Create pubsub for subscription handling
             self.pubsub = self.redis_client.pubsub()
 
             logger.info("Connected to Redis message bus")
@@ -93,7 +86,6 @@ class MessageBus:
             return False
 
     async def disconnect(self):
-        """Close Redis connection"""
         try:
             if self.pubsub:
                 await self.pubsub.aclose()
@@ -106,7 +98,6 @@ class MessageBus:
             logger.error(f"Error during disconnect: {error_details.message}")
 
     async def publish_event(self, channel: str, event: Event) -> bool:
-        """Publish event to Redis channel"""
         try:
             if not self.redis_client:
                 raise create_error(
@@ -115,7 +106,6 @@ class MessageBus:
                     context={"operation": "publish_event"},
                 )
 
-            # Validate event
             if not event.event_type or not event.event_id:
                 raise create_error(
                     ErrorCode.EVENT_VALIDATION_FAILED,
@@ -126,7 +116,6 @@ class MessageBus:
                     },
                 )
 
-            # Serialize the entire event dataclass, not just event.data
             from dataclasses import asdict
 
             event_dict = asdict(event)
@@ -157,8 +146,7 @@ class MessageBus:
                 context={"event_type": event.event_type, "original_error": str(e)},
             )
             logger.error(error.message)
-            # import traceback
-            # traceback.print_exc()
+
             return False
 
         except Exception as e:
@@ -167,7 +155,6 @@ class MessageBus:
             return False
 
     async def publish_command(self, channel: str, command: Command) -> bool:
-        """Publish command to Redis channel"""
         try:
             if not self.redis_client:
                 raise create_error(
@@ -176,7 +163,6 @@ class MessageBus:
                     context={"operation": "publish_command"},
                 )
 
-            # Validate command
             if not command.command_type or not command.target:
                 raise create_error(
                     ErrorCode.EVENT_VALIDATION_FAILED,
@@ -190,12 +176,11 @@ class MessageBus:
             from dataclasses import asdict
             command_dict = asdict(command)
 
-            # Convert all datetime objects to ISO strings
             for key, value in command_dict.items():
                 if isinstance(value, datetime):
                     command_dict[key] = value.isoformat()
                 elif key == "timestamp" and not isinstance(value, str):
-                    # Ensure timestamp is ISO string if not already
+
                     command_dict[key] = value.isoformat()
 
             message = {
@@ -240,7 +225,6 @@ class MessageBus:
             return False
 
     def subscribe(self, channel: str, handler: Callable):
-        """Subscribe to channel with event handler"""
         try:
             if not callable(handler):
                 raise create_error(
@@ -254,7 +238,7 @@ class MessageBus:
 
             if channel not in self.subscribers:
                 self.subscribers[channel] = []
-                # If already running, we need to subscribe in Redis too
+
                 if self.running and self.pubsub:
                     asyncio.create_task(self.pubsub.subscribe(channel))
                     logger.info(f"Dynamically subscribed to Redis channel: {channel}")
@@ -269,7 +253,6 @@ class MessageBus:
             )
 
     def unsubscribe(self, channel: str, handler: Callable):
-        """Unsubscribe handler from channel"""
         try:
             if channel in self.subscribers:
                 try:
@@ -286,7 +269,6 @@ class MessageBus:
             )
 
     async def start_listening(self):
-        """Start listening for subscribed channels"""
         try:
             if not self.pubsub:
                 raise create_error(
@@ -295,7 +277,6 @@ class MessageBus:
                     context={"operation": "start_listening"},
                 )
 
-            # Subscribe to all channels
             for channel in list(self.subscribers.keys()):
                 try:
                     await self.pubsub.subscribe(channel)
@@ -311,25 +292,22 @@ class MessageBus:
 
             self.running = True
 
-            # Listen for messages
             while self.running:
                 try:
-                    # Redis requires at least one subscription before calling get_message
+
                     if not self.pubsub.subscribed:
                         await asyncio.sleep(0.1)
                         continue
 
-                    # Use get_message with timeout to allow checking self.running periodically
                     message = await self.pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
                     if message:
                         if message["type"] == "message":
                             await self._handle_message(message)
                     else:
-                        # Yield control if no message
+
                         await asyncio.sleep(0.01)
                 except Exception as e:
-                    # Log error but keep loop running unless fatal
-                    # Transient errors shouldn't crash the listener
+
                     logger.warning(f"Error checking for messages: {e}")
                     await asyncio.sleep(0.1)
 
@@ -339,16 +317,13 @@ class MessageBus:
             self.running = False
 
     async def _handle_message(self, message):
-        """Handle incoming Redis message"""
         try:
             channel = message["channel"]
 
-            # Validate channel has subscribers
             if channel not in self.subscribers:
                 logger.warning(f"Received message on unsubscribed channel: {channel}")
                 return
 
-            # Parse message data
             try:
                 data = json.loads(message["data"])
             except json.JSONDecodeError as e:
@@ -360,7 +335,6 @@ class MessageBus:
                 logger.error(error.message)
                 return
 
-            # Call all subscribers for this channel
             for handler in list(self.subscribers[channel]):
                 try:
                     if asyncio.iscoroutinefunction(handler):
@@ -376,7 +350,6 @@ class MessageBus:
             logger.error(f"Failed to handle message: {error_details.message}")
 
     async def stop_listening(self):
-        """Stop listening for messages"""
         try:
             self.running = False
             if self.pubsub:
@@ -387,7 +360,6 @@ class MessageBus:
             error_details = handle_exception(e, "MessageBus")
             logger.error(f"Error stopping message listening: {error_details.message}")
 
-    # Channel constants
     CHANNELS = {
         "PASSENGER_EVENTS": "aexis:events:passenger",
         "CARGO_EVENTS": "aexis:events:cargo",
@@ -401,7 +373,6 @@ class MessageBus:
 
     @classmethod
     def get_event_channel(cls, event_type: str) -> str:
-        """Get appropriate channel for event type"""
         try:
             if "passenger" in event_type.lower():
                 return cls.CHANNELS["PASSENGER_EVENTS"]
@@ -419,7 +390,6 @@ class MessageBus:
 
     @classmethod
     def get_command_channel(cls, command_type: str, target_type: str) -> str:
-        """Get appropriate channel for command type"""
         try:
             if target_type == "pod":
                 return cls.CHANNELS["POD_COMMANDS"]
@@ -431,9 +401,7 @@ class MessageBus:
             logger.error(f"Error determining command channel for {command_type}: {e}")
             return cls.CHANNELS["SYSTEM_COMMANDS"]
 
-
 class LocalMessageBus(MessageBus):
-    """In-memory message bus for testing and local operation (No Redis required)"""
 
     def __init__(self):
         super().__init__(redis_url="local://")
@@ -441,31 +409,26 @@ class LocalMessageBus(MessageBus):
         self.running = False
 
     async def connect(self) -> bool:
-        """Simulate connection"""
         self.running = True
         logger.info("Local message bus initialized")
         return True
 
     async def disconnect(self):
-        """Simulate disconnect"""
         self.running = False
         logger.info("Local message bus disconnected")
 
     async def publish_event(self, channel: str, event: Event) -> bool:
-        """Publish event directly to local handlers"""
         if not self.running:
             return False
 
         from dataclasses import asdict
         event_dict = asdict(event)
-        
-        # Ensure timestamp is string
+
         if "timestamp" in event_dict:
             ts = event_dict["timestamp"]
             if isinstance(ts, datetime):
                 event_dict["timestamp"] = ts.strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Also check for other datetime/Enum fields in data
+
         if "data" in event_dict and isinstance(event_dict["data"], dict):
             for k, v in event_dict["data"].items():
                 if isinstance(v, datetime):
@@ -474,26 +437,22 @@ class LocalMessageBus(MessageBus):
                     event_dict["data"][k] = v.value
 
         message = {"channel": channel, "message": event_dict}
-        
-        # Immediate dispatch in local bus
+
         await self._handle_local_message(channel, message)
         return True
 
     async def publish_command(self, channel: str, command: Command) -> bool:
-        """Publish command directly to local handlers"""
         if not self.running:
             return False
 
         from dataclasses import asdict
         cmd_dict = asdict(command)
-        
-        # Ensure timestamp is string
+
         if "timestamp" in cmd_dict:
             ts = cmd_dict["timestamp"]
             if isinstance(ts, datetime):
                 cmd_dict["timestamp"] = ts.strftime('%Y-%m-%d %H:%M:%S')
 
-        # Handle Enums in parameters
         if "parameters" in cmd_dict and isinstance(cmd_dict["parameters"], dict):
             for k, v in cmd_dict["parameters"].items():
                 if isinstance(v, Enum):
@@ -505,19 +464,16 @@ class LocalMessageBus(MessageBus):
             "channel": channel,
             "message": cmd_dict
         }
-        
-        # Immediate dispatch in local bus
+
         await self._handle_local_message(channel, message)
         return True
 
     def subscribe(self, channel: str, handler: Callable):
-        """Subscribe to local channel"""
         if channel not in self.subscribers:
             self.subscribers[channel] = []
         self.subscribers[channel].append(handler)
 
     def unsubscribe(self, channel: str, handler: Callable):
-        """Unsubscribe from local channel"""
         if channel in self.subscribers:
             try:
                 self.subscribers[channel].remove(handler)
@@ -525,11 +481,9 @@ class LocalMessageBus(MessageBus):
                 pass
 
     async def start_listening(self):
-        """No-op for local bus (dispatch is immediate)"""
         self.running = True
 
     async def _handle_local_message(self, channel: str, data: dict):
-        """Dispatch message to local handlers"""
         if channel not in self.subscribers:
             return
 
@@ -543,12 +497,9 @@ class LocalMessageBus(MessageBus):
                 logger.error(f"Local handler error on {channel}: {e}")
 
     async def stop_listening(self):
-        """Stop local bus"""
         self.running = False
 
-
 class EventProcessor:
-    """Base class for event processors"""
 
     def __init__(self, message_bus: MessageBus, component_id: str):
         self.message_bus = message_bus
@@ -556,7 +507,6 @@ class EventProcessor:
         self.processing = False
 
     async def start(self):
-        """Start processing events"""
         try:
             self.processing = True
             await self._setup_subscriptions()
@@ -567,7 +517,6 @@ class EventProcessor:
             raise
 
     async def stop(self):
-        """Stop processing events"""
         try:
             self.processing = False
             await self._cleanup_subscriptions()
@@ -577,15 +526,12 @@ class EventProcessor:
             logger.error(f"Failed to stop event processor: {error_details.message}")
 
     async def _setup_subscriptions(self):
-        """Override to setup channel subscriptions"""
         pass
 
     async def _cleanup_subscriptions(self):
-        """Override to cleanup channel subscriptions"""
         pass
 
     async def publish_event(self, event: Event):
-        """Publish event with component source"""
         try:
             event.source = self.component_id
             channel = MessageBus.get_event_channel(event.event_type)
@@ -596,7 +542,6 @@ class EventProcessor:
             raise
 
     async def publish_command(self, command: Command):
-        """Publish command"""
         try:
             channel = MessageBus.get_command_channel(
                 command.command_type, self._get_target_type(command)
@@ -608,5 +553,4 @@ class EventProcessor:
             raise
 
     def _get_target_type(self, command: Command) -> str:
-        """Determine target type from command object"""
         return getattr(command, "target_type", "system")

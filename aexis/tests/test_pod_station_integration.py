@@ -1,17 +1,3 @@
-"""Full pod↔station end-to-end integration tests.
-
-Covers:
-- Passenger lifecycle: arrival→claim→route→arrive→deliver→queue cleared
-- Cargo lifecycle: request→claim→route→arrive→deliver→queue cleared
-- Multi-pod claim race: 3 pods compete for 1 passenger, exactly 1 wins
-- Proximity claim advantage: docked pod claims before remote pod
-- Pod re-decision on arrival: deliver, pick up new, re-decide
-- Congestion alert propagation: high congestion→alert→pod receives it
-- Route assignment command: external AssignRoute→pod EN_ROUTE
-- StationClient init guard: None redis → ValueError
-- Orphan claims: queue item deleted after claim → handled gracefully
-- Corrupt state data: corrupt JSON in state key → None
-"""
 
 import asyncio
 import json
@@ -36,19 +22,12 @@ from aexis.tests.conftest import (
     make_passenger_pod,
 )
 
-
-# ======================================================================
-# Passenger end-to-end
-# ======================================================================
-
-
 class TestPassengerEndToEnd:
-    """Full passenger lifecycle through pod and station."""
 
     async def test_passenger_pickup_and_delivery(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        # Station 1 has a passenger waiting for station 2
+
         station = Station(message_bus, redis_client, "1")
         await station._handle_passenger_arrival({
             "station_id": "1",
@@ -57,35 +36,24 @@ class TestPassengerEndToEnd:
         })
         assert station._passenger_count == 1
 
-        # Pod docked at station 1 claims the passenger
         pod = make_passenger_pod(
             message_bus, redis_client, station_client, station_id="1"
         )
         claim_ok = await station_client.claim_passenger("1", "p_e2e", pod.pod_id)
         assert claim_ok is True
 
-        # Pod picks up
         await pod._execute_pickup("1")
         assert len(pod.passengers) == 1
         assert pod.passengers[0]["passenger_id"] == "p_e2e"
 
-        # Pod routes to station 2 and delivers
         await pod._execute_delivery("2")
         assert len(pod.passengers) == 0
 
-        # Station queue should be cleared (passenger was picked up from Redis)
         pending = await station_client.get_pending_passengers("1")
         unclaimed = [p for p in pending if p["passenger_id"] == "p_e2e"]
         assert len(unclaimed) == 0
 
-
-# ======================================================================
-# Cargo end-to-end
-# ======================================================================
-
-
 class TestCargoEndToEnd:
-    """Full cargo lifecycle through pod and station."""
 
     async def test_cargo_load_and_delivery(
         self, message_bus, redis_client, station_client, network_context,
@@ -113,14 +81,7 @@ class TestCargoEndToEnd:
         assert len(pod.cargo) == 0
         assert pod.current_weight == 0.0
 
-
-# ======================================================================
-# Multi-pod claim race
-# ======================================================================
-
-
 class TestMultiPodClaimRace:
-    """Multiple pods race to claim one passenger; exactly 1 wins."""
 
     async def test_three_pods_one_passenger(
         self, message_bus, redis_client, station_client, network_context,
@@ -138,14 +99,7 @@ class TestMultiPodClaimRace:
         winners = sum(1 for r in results if r is True)
         assert winners == 1
 
-
-# ======================================================================
-# Proximity claim advantage
-# ======================================================================
-
-
 class TestProximityClaimAdvantage:
-    """Docked pod should claim before a remote pod due to 200ms delay."""
 
     async def test_docked_wins_over_remote(
         self, message_bus, redis_client, station_client, network_context,
@@ -161,11 +115,10 @@ class TestProximityClaimAdvantage:
             pod_id="remote", station_id="3",
         )
 
-        # Docked pod claims immediately
         docked_result = await station_client.claim_passenger(
             "1", "p_prox", docked_pod.pod_id
         )
-        # Remote pod claims with delay (simulating broadcast propagation)
+
         await asyncio.sleep(0.2)
         remote_result = await station_client.claim_passenger(
             "1", "p_prox", remote_pod.pod_id
@@ -174,14 +127,7 @@ class TestProximityClaimAdvantage:
         assert docked_result is True
         assert remote_result is False
 
-
-# ======================================================================
-# Pod re-decision on arrival
-# ======================================================================
-
-
 class TestPodReDecisionOnArrival:
-    """Pod arrives, delivers, picks up new payload, re-decides."""
 
     async def test_arrival_triggers_new_decision(
         self, message_bus, redis_client, station_client, network_context,
@@ -193,7 +139,7 @@ class TestPodReDecisionOnArrival:
             {"passenger_id": "p_deliver", "destination": "2",
              "pickup_time": datetime.now(UTC)},
         ]
-        # Seed a new passenger at station 2 for pickup after delivery
+
         await async_seed_passenger(redis_client, "2", "p_new", "4")
 
         decision_called = False
@@ -208,14 +154,7 @@ class TestPodReDecisionOnArrival:
         await pod._handle_station_arrival("2")
         assert decision_called
 
-
-# ======================================================================
-# Congestion alert propagation
-# ======================================================================
-
-
 class TestCongestionAlertPropagation:
-    """High congestion → alert published → pod on affected route receives it."""
 
     async def test_pod_receives_congestion_alert(
         self, message_bus, redis_client, station_client, network_context,
@@ -228,7 +167,6 @@ class TestCongestionAlertPropagation:
             route_id="r1", stations=["1", "2"], estimated_duration=5
         )
 
-        # Simulate the pod handling a congestion alert for station 2
         await pod._handle_congestion_alert({
             "message": {
                 "event_type": "CongestionAlert",
@@ -237,7 +175,7 @@ class TestCongestionAlertPropagation:
                 "severity": "critical",
             }
         })
-        # Pod should still be EN_ROUTE (alert is informational for current implementation)
+
         assert pod.status == PodStatus.EN_ROUTE
 
     async def test_pod_ignores_alert_for_unrelated_station(
@@ -275,14 +213,7 @@ class TestCongestionAlertPropagation:
         })
         assert pod.status == PodStatus.IDLE
 
-
-# ======================================================================
-# Route assignment command
-# ======================================================================
-
-
 class TestRouteAssignmentCommand:
-    """External AssignRoute command → pod starts moving."""
 
     async def test_assign_route_sets_en_route(
         self, message_bus, redis_client, station_client, network_context,
@@ -319,27 +250,13 @@ class TestRouteAssignmentCommand:
         assert pod.status == PodStatus.IDLE
         assert pod.current_route is None
 
-
-# ======================================================================
-# StationClient constructor guard
-# ======================================================================
-
-
 class TestStationClientInit:
-    """StationClient(None) raises ValueError."""
 
     def test_none_redis_raises(self):
         with pytest.raises((ValueError, TypeError)):
             StationClient(None)
 
-
-# ======================================================================
-# Orphan claims
-# ======================================================================
-
-
 class TestOrphanClaims:
-    """Queue item deleted after claim → claimed query returns empty."""
 
     async def test_orphan_passenger_claim(
         self, redis_client, station_client,
@@ -350,12 +267,10 @@ class TestOrphanClaims:
         )
         assert claim_ok is True
 
-        # Delete the passenger from the queue (orphan)
         await redis_client.hdel("aexis:station:1:passengers", "p_orphan")
 
-        # Claimed query should still work (returns the claim, data may be partial)
         claimed = await station_client.get_claimed_passengers("1", "pod_x")
-        # The claim record exists but the passenger data is gone
+
         assert isinstance(claimed, list)
 
     async def test_orphan_cargo_claim(
@@ -372,14 +287,7 @@ class TestOrphanClaims:
         claimed = await station_client.get_claimed_cargo("1", "pod_x")
         assert isinstance(claimed, list)
 
-
-# ======================================================================
-# Corrupt state data
-# ======================================================================
-
-
 class TestCorruptStateData:
-    """Corrupt JSON in state key → get_station_state returns None."""
 
     async def test_corrupt_state_returns_none(
         self, redis_client, station_client,

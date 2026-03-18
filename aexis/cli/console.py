@@ -1,15 +1,3 @@
-"""AEXIS Command-Line Interface (CLI)
-
-Provides an interactive command-line interface for managing the AEXIS
-autonomous transportation system via its REST API. Users can control the system,
-monitor metrics, and inject manual requests.
-
-Design:
-- Client/Server Architecture: CLI acts as a client to the running AEXIS API
-- Stateless: No local system logic, purely API driven
-- Synchronous: Uses httpx synchronous client for cmd.Cmd compatibility
-"""
-
 import cmd
 import json
 import logging
@@ -20,7 +8,6 @@ from typing import Any
 import httpx
 from tabulate import tabulate
 
-# Configure logging
 logging.basicConfig(
     level=logging.WARN,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -28,16 +15,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 class APIClient:
-    """Synchronous API Client for AEXIS System"""
 
     def __init__(self, base_url: str = "http://localhost:8001"):
         self.base_url = base_url.rstrip("/")
         self.client = httpx.Client(timeout=5.0)
 
     def check_health(self) -> bool:
-        """Check if API is reachable"""
         try:
             resp = self.client.get(f"{self.base_url}/api/system/status")
             return resp.status_code == 200
@@ -45,19 +29,16 @@ class APIClient:
             return False
 
     def get_system_state(self) -> dict[str, Any]:
-        """Get full system state"""
         resp = self.client.get(f"{self.base_url}/api/system/status")
         resp.raise_for_status()
         return resp.json()
 
     def get_all_pods(self) -> dict[str, Any]:
-        """Get all pods"""
         resp = self.client.get(f"{self.base_url}/api/pods")
         resp.raise_for_status()
         return resp.json()
 
     def get_pod_state(self, pod_id: str) -> dict[str, Any] | None:
-        """Get specific pod state"""
         try:
             resp = self.client.get(f"{self.base_url}/api/pods/{pod_id}")
             if resp.status_code == 404:
@@ -68,13 +49,11 @@ class APIClient:
             return None
 
     def get_all_stations(self) -> dict[str, Any]:
-        """Get all stations"""
         resp = self.client.get(f"{self.base_url}/api/stations")
         resp.raise_for_status()
         return resp.json()
 
     def get_station_state(self, station_id: str) -> dict[str, Any] | None:
-        """Get specific station state"""
         try:
             resp = self.client.get(f"{self.base_url}/api/stations/{station_id}")
             if resp.status_code == 404:
@@ -85,23 +64,18 @@ class APIClient:
             return None
 
     def inject_passenger(self, origin: str, dest: str, count: int) -> bool:
-        """Inject passenger request"""
         payload = {"origin": origin, "destination": dest, "count": count}
         resp = self.client.post(f"{self.base_url}/api/manual/passenger", json=payload)
         resp.raise_for_status()
         return True
 
     def inject_cargo(self, origin: str, dest: str, weight: float) -> bool:
-        """Inject cargo request"""
         payload = {"origin": origin, "destination": dest, "weight": weight}
         resp = self.client.post(f"{self.base_url}/api/manual/cargo", json=payload)
         resp.raise_for_status()
         return True
 
-
 class AexisCLI(cmd.Cmd):
-    """Interactive CLI for AEXIS system management"""
-
     prompt = "aexis> "
     intro = (
         "\n"
@@ -113,48 +87,38 @@ class AexisCLI(cmd.Cmd):
     )
 
     def __init__(self, client: APIClient):
-        """Initialize CLI with API client"""
         super().__init__()
         self.client = client
         self._setup_logging()
 
     def _setup_logging(self) -> None:
-        """Configure logging for CLI operations"""
         logging.basicConfig(
             level=logging.INFO,
             format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         )
 
     def _check_connection(self) -> bool:
-        """Verify API is reachable"""
         if not self.client.check_health():
             self._error("Cannot connect to AEXIS API. Is the system running?")
             return False
         return True
 
     def _error(self, message: str) -> None:
-        """Print error message"""
         print(f"✗ Error: {message}")
 
     def _success(self, message: str) -> None:
-        """Print success message"""
         print(f"✓ {message}")
 
     def _info(self, message: str) -> None:
-        """Print info message"""
         print(f"ℹ {message}")
 
-    # --- System Management Commands ---
-
     def do_status(self, args: str) -> None:
-        """Display current system status"""
         if not self._check_connection():
             return
 
         try:
             state = self.client.get_system_state()
 
-            # Format system info
             uptime = int(state.get("uptime_seconds", 0))
             uptime_fmt = f"{uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s"
 
@@ -170,7 +134,6 @@ class AexisCLI(cmd.Cmd):
             ]
             print(tabulate(system_info, tablefmt="plain"))
 
-            # Metrics table
             metrics = state.get("metrics", {})
             print("\nMetrics:")
             metrics_data = [
@@ -196,13 +159,12 @@ class AexisCLI(cmd.Cmd):
             self._error(f"Failed to retrieve status: {str(e)}")
 
     def do_pods(self, args: str) -> None:
-        """List all pods or show specific pod details"""
         if not self._check_connection():
             return
 
         try:
             if args.strip():
-                # Show specific pod
+
                 pod_id = args.strip()
                 pod_state = self.client.get_pod_state(pod_id)
 
@@ -213,14 +175,14 @@ class AexisCLI(cmd.Cmd):
                 print(f"\nPod: {pod_id}")
                 print(json.dumps(pod_state, indent=2))
             else:
-                # List all pods
+
                 pods = self.client.get_all_pods()
                 if not pods:
                     self._info("No pods in system")
                     return
 
                 pods_data = []
-                # Sort by ID
+
                 for pod_id in sorted(pods.keys()):
                     state = pods[pod_id]
                     pods_data.append(
@@ -253,13 +215,12 @@ class AexisCLI(cmd.Cmd):
             self._error(f"Failed to retrieve pod information: {str(e)}")
 
     def do_stations(self, args: str) -> None:
-        """List all stations or show specific station details"""
         if not self._check_connection():
             return
 
         try:
             if args.strip():
-                # Show specific station
+
                 station_id = args.strip()
                 station_state = self.client.get_station_state(station_id)
 
@@ -270,7 +231,7 @@ class AexisCLI(cmd.Cmd):
                 print(f"\nStation: {station_id}")
                 print(json.dumps(station_state, indent=2))
             else:
-                # List all stations
+
                 stations = self.client.get_all_stations()
                 if not stations:
                     self._info("No stations in system")
@@ -308,10 +269,7 @@ class AexisCLI(cmd.Cmd):
         except Exception as e:
             self._error(f"Failed to retrieve station information: {str(e)}")
 
-    # --- Load Injection Commands ---
-
     def do_inject_passenger(self, args: str) -> None:
-        """Inject passenger request: inject_passenger <origin> <dest> [count]"""
         if not self._check_connection():
             return
 
@@ -333,7 +291,6 @@ class AexisCLI(cmd.Cmd):
             self._error(f"Failed to inject passenger request: {str(e)}")
 
     def do_inject_cargo(self, args: str) -> None:
-        """Inject cargo request: inject_cargo <origin> <dest> [weight]"""
         if not self._check_connection():
             return
 
@@ -353,7 +310,6 @@ class AexisCLI(cmd.Cmd):
             self._error(f"Failed to inject cargo request: {str(e)}")
 
     def do_watch(self, args: str) -> None:
-        """Watch live system state: watch [interval_seconds]"""
         if not self._check_connection():
             return
 
@@ -370,15 +326,13 @@ class AexisCLI(cmd.Cmd):
 
         try:
             while True:
-                # Fetch fresh state
+
                 state = self.client.get_system_state()
                 pods = self.client.get_all_pods()
                 stations = self.client.get_all_stations()
 
-                # Clear screen
                 os.system("clear" if os.name == "posix" else "cls")
 
-                # Print System Metrics
                 uptime = int(state.get("uptime_seconds", 0))
                 uptime_fmt = f"{uptime // 3600}h {(uptime % 3600) // 60}m {uptime % 60}s"
                 metrics = state.get("metrics", {})
@@ -397,10 +351,9 @@ class AexisCLI(cmd.Cmd):
                 print(tabulate(sys_data, tablefmt="plain"))
                 print()
 
-                # Print Pods
                 if pods:
                     pods_data = []
-                    for pid in sorted(pods.keys())[:15]:  # Limit to 15 pods to fit on screen
+                    for pid in sorted(pods.keys())[:15]:
                         pstate = pods[pid]
                         pods_data.append([
                             pid,
@@ -413,7 +366,6 @@ class AexisCLI(cmd.Cmd):
                     print(tabulate(pods_data, headers=["ID", "Status", "Spine", "Speed", "Load"], tablefmt="simple"))
                     print()
 
-                # Print Stations
                 if stations:
                     st_data = []
                     for sid in sorted(stations.keys())[:10]:
@@ -427,21 +379,18 @@ class AexisCLI(cmd.Cmd):
                     print("Stations (Top 10):")
                     print(tabulate(st_data, headers=["ID", "Status", "Pax Wait", "Cargo Wait"], tablefmt="simple"))
                     print()
-                
+
                 print(f"Updating every {interval}s... Press Ctrl+C to exit.")
                 time.sleep(interval)
-                
+
         except KeyboardInterrupt:
-            # Graceful exit from watch mode
+
             print("\nExited watch mode.")
             return
         except Exception as e:
             self._error(f"Watch failed: {e}")
 
-    # --- Navigation Commands ---
-
     def do_help(self, args: str) -> None:
-        """Show available commands"""
         if not args:
             print("\nAvailable Commands:")
             print("  System Management:")
@@ -462,16 +411,13 @@ class AexisCLI(cmd.Cmd):
             super().do_help(args)
 
     def do_clear(self, args: str) -> None:
-        """Clear terminal screen"""
         os.system("clear" if os.name == "posix" else "cls")
 
     def do_quit(self, args: str) -> bool:
-        """Exit the CLI"""
         print("Exiting AEXIS CLI. Goodbye!")
         return True
 
     def do_EOF(self, args: str) -> bool:
-        """Handle Ctrl+D"""
         print()
         return self.do_quit(args)
 
@@ -481,22 +427,17 @@ class AexisCLI(cmd.Cmd):
     def default(self, line: str) -> None:
         self._error(f"Unknown command: '{line.split()[0] if line else ''}'.")
 
-
 def main():
-    """Entry point for CLI"""
     try:
-        # Determine API URL from Env or Default
+
         api_host = os.getenv("API_HOST", "localhost")
         api_port = os.getenv("API_PORT", "8001")
         api_url = f"http://{api_host}:{api_port}"
 
-        # Initialize Client
         client = APIClient(base_url=api_url)
 
-        # Create and run CLI
         cli = AexisCLI(client)
 
-        # Initial check
         if not client.check_health():
             print(f"Warning: Could not connect to API at {api_url}")
             print("Ensure the AEXIS system services are running.")
@@ -511,7 +452,6 @@ def main():
     except Exception as e:
         print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

@@ -1,8 +1,3 @@
-"""AEXIS API routes — reads all state from Redis.
-
-No direct references to AexisSystem, pods, or stations. All state
-is fetched from Redis keys written by station and pod processes.
-"""
 
 import asyncio
 import json
@@ -20,21 +15,17 @@ from aexis.core.network import load_network_data
 
 logger = logging.getLogger(__name__)
 
-
 class PassengerRequestModel(BaseModel):
     origin: str
     destination: str
     count: int = 1
-
 
 class CargoRequestModel(BaseModel):
     origin: str
     destination: str
     weight: float = 100.0
 
-
 class SystemAPI:
-    """API layer reading all state from Redis — no in-process system dependency."""
 
     def __init__(
         self,
@@ -56,7 +47,6 @@ class SystemAPI:
         self._setup_routes()
 
     async def start_listeners(self):
-        """Begin background tasks after the event loop is running."""
         self._position_listener_task = asyncio.create_task(
             self._listen_for_position_updates()
         )
@@ -64,7 +54,6 @@ class SystemAPI:
     def _setup_routes(self):
         @self.app.get("/api/system/status")
         async def get_system_status():
-            """Aggregate system status from all pod and station state keys."""
             try:
                 pods = await self._get_all_pod_states()
                 stations = await self._get_all_station_states()
@@ -105,10 +94,10 @@ class SystemAPI:
                         "total_stations": len(stations),
                         "pending_passengers": waiting_passengers,
                         "pending_cargo": waiting_cargo,
-                        "system_efficiency": 0.85,  # Placeholder for now
-                        "average_wait_time": 12.5,  # Placeholder
-                        "throughput_per_hour": 450, # Placeholder
-                        "fallback_usage_rate": 0.05, # Placeholder
+                        "system_efficiency": 0.85,
+                        "average_wait_time": 12.5,
+                        "throughput_per_hour": 450,
+                        "fallback_usage_rate": 0.05,
                     },
                 }
             except Exception as e:
@@ -117,7 +106,6 @@ class SystemAPI:
 
         @self.app.get("/api/system/metrics")
         async def get_system_metrics():
-            """Aggregate metrics from stations."""
             try:
                 stations = await self._get_all_station_states()
                 total_passengers = sum(
@@ -185,7 +173,6 @@ class SystemAPI:
 
         @self.app.post("/api/manual/passenger")
         async def inject_passenger(payload: PassengerRequestModel):
-            """Inject passengers by publishing PassengerArrival events."""
             try:
                 origin = payload.origin.strip()
                 dest = payload.destination.strip()
@@ -213,7 +200,6 @@ class SystemAPI:
                         status_code=400, detail="count exceeds maximum (1000)"
                     )
 
-                # Validate station exists in Redis
                 origin_state = await self._redis.get(
                     f"aexis:station:{origin}:state"
                 )
@@ -262,7 +248,6 @@ class SystemAPI:
 
         @self.app.post("/api/manual/cargo")
         async def inject_cargo(payload: CargoRequestModel):
-            """Inject cargo by publishing a CargoRequest event."""
             try:
                 origin = payload.origin.strip()
                 dest = payload.destination.strip()
@@ -370,10 +355,6 @@ class SystemAPI:
                 if websocket in self.position_subscribers:
                     self.position_subscribers.remove(websocket)
 
-    # ------------------------------------------------------------------
-    # Redis state helpers
-    # ------------------------------------------------------------------
-
     async def _get_all_pod_states(self) -> dict[str, dict]:
         result = {}
         async for key in self._redis.scan_iter(
@@ -406,12 +387,7 @@ class SystemAPI:
                         pass
         return result
 
-    # ------------------------------------------------------------------
-    # Position streaming
-    # ------------------------------------------------------------------
-
     async def _listen_for_position_updates(self):
-        """Subscribe to pod position events and broadcast to WebSocket clients."""
         try:
             await asyncio.sleep(1)
 

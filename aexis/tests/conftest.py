@@ -1,8 +1,3 @@
-"""Shared test fixtures for AEXIS microservices unit tests.
-
-Uses fakeredis for Redis operations — no external Redis needed.
-Uses LocalMessageBus for event pub/sub.
-"""
 
 import asyncio
 import json
@@ -17,12 +12,9 @@ from aexis.core.model import Coordinate, EdgeSegment
 from aexis.core.network import NetworkContext
 from aexis.core.station_client import StationClient
 
-
-# Add project root to path
 sys.path.append(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-
 
 @pytest.fixture
 def event_loop():
@@ -30,19 +22,15 @@ def event_loop():
     yield loop
     loop.close()
 
-
 @pytest.fixture
 async def redis_client():
-    """In-memory Redis for deterministic, fast unit tests."""
     client = fakeredis.aioredis.FakeRedis(decode_responses=True)
     yield client
     await client.aclose()
 
-
 @pytest.fixture
 async def station_client(redis_client):
     return StationClient(redis_client)
-
 
 @pytest.fixture
 async def message_bus():
@@ -51,10 +39,8 @@ async def message_bus():
     yield bus
     await bus.disconnect()
 
-
 @pytest.fixture
 def network_context():
-    """Minimal 4-station network for testing."""
     test_network = {
         "nodes": [
             {
@@ -99,14 +85,8 @@ def network_context():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
-# ------------------------------------------------------------------
-# Topology-varied network fixtures
-# ------------------------------------------------------------------
-
 @pytest.fixture
 def linear_network():
-    """5 stations in a chain: 1→2→3→4→5 (no shortcuts)."""
     nodes = []
     for i in range(1, 6):
         adj = []
@@ -124,10 +104,8 @@ def linear_network():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
 @pytest.fixture
 def star_network():
-    """Hub 1 + spokes 2,3,4,5 — all traffic routes through center."""
     hub = {
         "id": "1",
         "label": "1",
@@ -149,10 +127,8 @@ def star_network():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
 @pytest.fixture
 def ring_network():
-    """5 stations in a cycle: 1→2→3→4→5→1."""
     nodes = []
     import math
     for i in range(1, 6):
@@ -174,10 +150,8 @@ def ring_network():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
 @pytest.fixture
 def disconnected_network():
-    """Two isolated clusters: A(1↔2), B(3↔4). No cross-edges."""
     nodes = [
         {
             "id": "1", "label": "1",
@@ -204,10 +178,8 @@ def disconnected_network():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
 @pytest.fixture
 def single_station_network():
-    """Degenerate case: 1 node, 0 edges."""
     nodes = [{
         "id": "1", "label": "1",
         "coordinate": {"x": 0, "y": 0},
@@ -217,33 +189,28 @@ def single_station_network():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
 @pytest.fixture
 def large_network():
-    """50 stations in a grid (roughly 7×7+1) for scale-up tests.
-
-    Each station connects to its grid neighbours (up/down/left/right).
-    """
     grid_size = 7
-    total = grid_size * grid_size + 1  # 50 stations
+    total = grid_size * grid_size + 1
     nodes = []
     for idx in range(1, total + 1):
         row = (idx - 1) // grid_size
         col = (idx - 1) % grid_size
         adj = []
-        # right neighbour
+
         right = idx + 1
         if col < grid_size - 1 and right <= total:
             adj.append({"node_id": str(right), "weight": 1.0})
-        # left neighbour
+
         left = idx - 1
         if col > 0 and left >= 1:
             adj.append({"node_id": str(left), "weight": 1.0})
-        # down neighbour
+
         down = idx + grid_size
         if down <= total:
             adj.append({"node_id": str(down), "weight": 1.0})
-        # up neighbour
+
         up = idx - grid_size
         if up >= 1:
             adj.append({"node_id": str(up), "weight": 1.0})
@@ -257,14 +224,8 @@ def large_network():
     NetworkContext.set_instance(ctx)
     yield ctx
 
-
-# ------------------------------------------------------------------
-# Pod factory helpers
-# ------------------------------------------------------------------
-
 def make_passenger_pod(message_bus, redis_client, station_client, pod_id="1",
                        station_id="1"):
-    """Create a PassengerPod docked at the given station."""
     from aexis.pod import PassengerPod
     from aexis.core.model import LocationDescriptor, Coordinate
     from aexis.core.network import NetworkContext
@@ -279,10 +240,8 @@ def make_passenger_pod(message_bus, redis_client, station_client, pod_id="1",
     )
     return pod
 
-
 def make_cargo_pod(message_bus, redis_client, station_client, pod_id="1",
                    station_id="1"):
-    """Create a CargoPod docked at the given station."""
     from aexis.pod import CargoPod
     from aexis.core.model import LocationDescriptor, Coordinate
     from aexis.core.network import NetworkContext
@@ -297,13 +256,7 @@ def make_cargo_pod(message_bus, redis_client, station_client, pod_id="1",
     )
     return pod
 
-
-# ------------------------------------------------------------------
-# Data seeding helpers
-# ------------------------------------------------------------------
-
 def seed_passenger(redis_client, station_id: str, passenger_id: str, dest: str):
-    """Helper to seed a passenger directly into a Redis hash (sync wrapper)."""
     import asyncio
 
     async def _seed():
@@ -318,7 +271,6 @@ def seed_passenger(redis_client, station_id: str, passenger_id: str, dest: str):
 
     asyncio.get_event_loop().run_until_complete(_seed())
 
-
 async def async_seed_passenger(
     redis_client, station_id: str, passenger_id: str, dest: str
 ):
@@ -330,7 +282,6 @@ async def async_seed_passenger(
         "arrival_time": "2026-01-01T00:00:00",
     })
     await redis_client.hset(key, passenger_id, data)
-
 
 async def async_seed_cargo(
     redis_client, station_id: str, request_id: str, dest: str, weight: float

@@ -1,13 +1,3 @@
-"""Knowledge Base data management for DigitalOcean Gradient.
-
-Uploads network topology data to a DigitalOcean Spaces bucket that backs
-a Gradient Knowledge Base.  The platform indexes the uploaded files and
-makes them available for RAG when the agent processes routing decisions.
-
-The Knowledge Base and its connection to the Spaces bucket are configured
-in the DigitalOcean Control Panel.  This module only handles the data
-pipeline (upload/refresh).
-"""
 
 import json
 import logging
@@ -18,16 +8,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 logger = logging.getLogger(__name__)
 
-
 class KnowledgeBaseManager:
-    """Manages data uploads to the DigitalOcean Spaces bucket that backs
-    the Gradient Knowledge Base for RAG.
-
-    The platform-side KB indexes the bucket contents automatically.
-    This class handles:
-    - Serialising network topology to a structured JSON document
-    - Uploading to the Spaces bucket via the S3-compatible API
-    """
 
     def __init__(self):
         region = os.environ.get("DO_SPACES_REGION", "nyc3")
@@ -53,7 +34,6 @@ class KnowledgeBaseManager:
 
     @property
     def is_configured(self) -> bool:
-        """Whether the manager has valid Spaces credentials."""
         return self._client is not None and bool(self._bucket_name)
 
     def upload_network_topology(
@@ -61,17 +41,6 @@ class KnowledgeBaseManager:
         network_data: dict,
         filename: str = "aexis_network_topology.json",
     ) -> bool:
-        """Serialize and upload network topology to the Spaces bucket.
-
-        The Knowledge Base will re-index this file on its next sync cycle.
-
-        Args:
-            network_data: Raw network dict (stations, edges, coordinates).
-            filename: Object key in the Spaces bucket.
-
-        Returns:
-            True if upload succeeded, False otherwise.
-        """
         if not self.is_configured:
             logger.error(
                 "Cannot upload network topology: Spaces credentials or bucket not configured"
@@ -106,15 +75,6 @@ class KnowledgeBaseManager:
         station_data: list[dict],
         filename: str = "aexis_station_metadata.json",
     ) -> bool:
-        """Upload enriched station metadata for RAG context.
-
-        Args:
-            station_data: List of station dicts with capacities, queues, etc.
-            filename: Object key in the Spaces bucket.
-
-        Returns:
-            True if upload succeeded, False otherwise.
-        """
         if not self.is_configured:
             logger.error("Cannot upload station metadata: not configured")
             return False
@@ -136,16 +96,8 @@ class KnowledgeBaseManager:
             logger.error("Failed to upload station metadata to Spaces: %s", exc)
             return False
 
-    # -- internal -----------------------------------------------------------
-
     @staticmethod
     def _build_topology_document(network_data: dict) -> dict:
-        """Transform raw network data into a structured document
-        optimized for RAG retrieval.
-
-        The document uses natural language descriptions alongside the raw
-        data so the LLM can reason about the topology effectively.
-        """
         stations = []
         edges = []
 

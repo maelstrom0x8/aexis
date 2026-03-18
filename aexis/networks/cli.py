@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""CLI utility for managing and switching between network configurations.
-
-Usage:
-    python -m aexis.networks.cli list
-    python -m aexis.networks.cli info <network_name>
-    python -m aexis.networks.cli validate <network_name>
-    python -m aexis.networks.cli env <network_name>
-"""
 
 import json
 import sys
@@ -14,9 +6,7 @@ from pathlib import Path
 
 from aexis.networks import NetworkLoader
 
-
 def cmd_list(loader: NetworkLoader) -> int:
-    """List all available networks."""
     networks = loader.list_networks()
 
     if not networks:
@@ -34,9 +24,7 @@ def cmd_list(loader: NetworkLoader) -> int:
 
     return 0
 
-
 def cmd_info(loader: NetworkLoader, network_name: str) -> int:
-    """Show detailed information about a network."""
     try:
         network = loader.load_network(network_name)
     except FileNotFoundError as e:
@@ -60,16 +48,12 @@ def cmd_info(loader: NetworkLoader, network_name: str) -> int:
 
     return 0
 
-
 def cmd_validate(loader: NetworkLoader, network_name: str) -> int:
-    """Validate a network configuration."""
     is_valid, message = loader.validate_network(network_name)
     print(message)
     return 0 if is_valid else 1
 
-
 def cmd_env(loader: NetworkLoader, network_name: str) -> int:
-    """Print environment variable export command."""
     try:
         path = loader.get_network_path(network_name)
         print(f"export AEXIS_NETWORK_DATA={path}")
@@ -78,9 +62,7 @@ def cmd_env(loader: NetworkLoader, network_name: str) -> int:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-
 def main() -> int:
-    """Main entry point."""
     if len(sys.argv) < 2:
         print("Usage: python -m aexis.networks.cli <command> [args]")
         print("\nCommands:")
@@ -118,7 +100,6 @@ def main() -> int:
     else:
         print(f"Unknown command: {command}")
         return 1
-
 
 if __name__ == "__main__":
     sys.exit(main())

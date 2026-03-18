@@ -1,11 +1,3 @@
-"""AEXIS API server entry point.
-
-Connects directly to Redis — no AexisSystem dependency.
-Pod and station state is read from Redis keys written by their processes.
-
-Usage:
-    python -m aexis.api.main
-"""
 
 import asyncio
 import logging
@@ -21,9 +13,8 @@ from aexis.core.message_bus import MessageBus
 
 logger = logging.getLogger(__name__)
 
-
 async def main():
-    # Setup structured logging
+
     setup_logging("api")
 
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
@@ -33,7 +24,6 @@ async def main():
         logger.error("REDIS_PASSWORD environment variable is required")
         return
 
-    # Connect to Redis
     redis_client = redis.from_url(
         redis_url,
         password=redis_password,
@@ -48,7 +38,6 @@ async def main():
         logger.error(f"Cannot connect to Redis at {redis_url}: {e}")
         return
 
-    # Message bus (for event publishing on manual injection + position listener)
     message_bus = MessageBus(redis_url=redis_url, password=redis_password)
     if not await message_bus.connect():
         logger.error("Failed to connect MessageBus")
@@ -56,7 +45,6 @@ async def main():
 
     bus_task = asyncio.create_task(message_bus.start_listening())
 
-    # API
     api = SystemAPI(redis_client, message_bus)
     await api.start_listeners()
     app = api.get_app()
@@ -76,7 +64,6 @@ async def main():
         await message_bus.disconnect()
         await redis_client.aclose()
         logger.info("API shut down")
-
 
 if __name__ == "__main__":
     asyncio.run(main())

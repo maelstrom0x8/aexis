@@ -1,13 +1,3 @@
-"""CargoPod-specific tests: pickup, delivery, claim eligibility, arrival flow.
-
-Covers every branch in CargoPod that differs from PassengerPod:
-- Weight-based pickup (pre-claimed, opportunistic, overweight skip, duplicate skip)
-- Weight decrement on delivery
-- Claim eligibility matrix (IDLE/EN_ROUTE × on/off-route × weight-ok/full)
-- Arrival flow (lock guard, PodArrival event, 2s docking, deliver→pickup→decide)
-- Event filtering (non-CargoRequest events ignored)
-- Decision context builder (station / edge / no-segment fallback)
-"""
 
 import asyncio
 from datetime import UTC, datetime
@@ -24,14 +14,7 @@ from aexis.core.model import (
 from aexis.pod import CargoPod
 from aexis.tests.conftest import async_seed_cargo, make_cargo_pod
 
-
-# ======================================================================
-# Cargo pickup
-# ======================================================================
-
-
 class TestCargoPickup:
-    """_execute_pickup weight logic and event publishing."""
 
     async def test_preclaimed_cargo_loaded(
         self, message_bus, redis_client, station_client, network_context,
@@ -50,7 +33,7 @@ class TestCargoPickup:
     ):
         pod = make_cargo_pod(message_bus, redis_client, station_client)
         await async_seed_cargo(redis_client, "1", "c_opp", "2", 30.0)
-        # Not pre-claimed — should be opportunistically picked up
+
         await pod._execute_pickup("1")
         assert any(c["request_id"] == "c_opp" for c in pod.cargo)
         assert pod.current_weight == 30.0
@@ -64,7 +47,7 @@ class TestCargoPickup:
         await station_client.claim_cargo("1", "c_heavy", pod.pod_id)
 
         await pod._execute_pickup("1")
-        # 490 + 20 > 500 → skipped
+
         assert not any(c["request_id"] == "c_heavy" for c in pod.cargo)
 
     async def test_duplicate_cargo_not_loaded_twice(
@@ -84,7 +67,6 @@ class TestCargoPickup:
     async def test_zero_weight_cargo_skipped(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Cargo with weight <= 0 is rejected by the pickup logic."""
         pod = make_cargo_pod(message_bus, redis_client, station_client)
         await async_seed_cargo(redis_client, "1", "c_zero", "2", 0.0)
         await station_client.claim_cargo("1", "c_zero", pod.pod_id)
@@ -104,7 +86,6 @@ class TestCargoPickup:
     async def test_multiple_items_summing_to_boundary(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Multiple items that exactly fill remaining capacity."""
         pod = make_cargo_pod(message_bus, redis_client, station_client)
         pod.current_weight = 400.0
         for i in range(4):
@@ -112,18 +93,11 @@ class TestCargoPickup:
                 redis_client, "1", f"c_{i}", "2", 25.0
             )
         await pod._execute_pickup("1")
-        # 400 + 4*25 = 500 exactly
+
         assert pod.current_weight == 500.0
         assert len(pod.cargo) == 4
 
-
-# ======================================================================
-# Cargo delivery
-# ======================================================================
-
-
 class TestCargoDelivery:
-    """_execute_delivery weight decrement and event publishing."""
 
     async def test_matching_cargo_delivered(
         self, message_bus, redis_client, station_client, network_context,
@@ -151,12 +125,11 @@ class TestCargoDelivery:
         await pod._execute_delivery("2")
         assert len(pod.cargo) == 1
         assert pod.current_weight == 50.0
-        assert pod.status == PodStatus.IDLE  # no status transition
+        assert pod.status == PodStatus.IDLE
 
     async def test_delivery_status_transitions(
         self, message_bus, redis_client, station_client, network_context,
     ):
-        """Status should go UNLOADING during delivery, then EN_ROUTE after."""
         pod = make_cargo_pod(message_bus, redis_client, station_client)
         pod.cargo = [{"request_id": "c_1", "destination": "2", "weight": 50.0}]
         pod.current_weight = 50.0
@@ -174,21 +147,14 @@ class TestCargoDelivery:
         assert PodStatus.UNLOADING in statuses_seen
         assert pod.status == PodStatus.EN_ROUTE
 
-
-# ======================================================================
-# Claim eligibility matrix
-# ======================================================================
-
-
 class TestCargoClaimEligibility:
-    """Parameterized eligibility for cargo request broadcasts."""
 
     @pytest.mark.parametrize("status,on_route,weight_ok,has_fields,expected", [
         (PodStatus.IDLE, False, True, True, True),
         (PodStatus.EN_ROUTE, True, True, True, True),
         (PodStatus.EN_ROUTE, False, True, True, False),
-        (PodStatus.IDLE, False, False, True, False),      # overweight
-        (PodStatus.IDLE, False, True, False, False),       # missing origin
+        (PodStatus.IDLE, False, False, True, False),
+        (PodStatus.IDLE, False, True, False, False),
         (PodStatus.LOADING, False, True, True, False),
         (PodStatus.UNLOADING, False, True, True, False),
         (PodStatus.MAINTENANCE, False, True, True, False),
@@ -200,7 +166,7 @@ class TestCargoClaimEligibility:
         pod = make_cargo_pod(message_bus, redis_client, station_client)
         pod.status = status
         if not weight_ok:
-            pod.current_weight = 500.0  # full
+            pod.current_weight = 500.0
 
         if status == PodStatus.EN_ROUTE:
             if on_route:
@@ -236,14 +202,7 @@ class TestCargoClaimEligibility:
         await pod._handle_request_broadcast(request)
         assert decision_called == expected
 
-
-# ======================================================================
-# Arrival flow
-# ======================================================================
-
-
 class TestCargoArrivalFlow:
-    """_handle_station_arrival orchestration."""
 
     async def test_arrival_sets_idle_and_publishes_pod_arrival(
         self, message_bus, redis_client, station_client, network_context,
@@ -284,18 +243,10 @@ class TestCargoArrivalFlow:
             pod._handle_station_arrival("1"),
         )
 
-        # Only one PodArrival event should have been published
         pod_arrivals = [e for e in events_published if e == "PodArrival"]
         assert len(pod_arrivals) == 1
 
-
-# ======================================================================
-# Event filtering
-# ======================================================================
-
-
 class TestCargoEventFiltering:
-    """Non-CargoRequest events should be silently ignored."""
 
     @pytest.mark.parametrize("event_type", [
         "CargoLoaded",
@@ -325,14 +276,7 @@ class TestCargoEventFiltering:
         })
         assert not broadcast_called
 
-
-# ======================================================================
-# Decision context
-# ======================================================================
-
-
 class TestCargoDecisionContext:
-    """_build_decision_context resolves location correctly."""
 
     async def test_at_station(
         self, message_bus, redis_client, station_client, network_context,
@@ -371,5 +315,5 @@ class TestCargoDecisionContext:
         pod.current_segment = None
         pod._available_requests = []
         ctx = await pod._build_decision_context()
-        # (90,0) is closest to station 2 at (100,0)
+
         assert ctx.current_location == "2"

@@ -44,15 +44,13 @@ docker compose up -d
 uv sync
 
 # Run the system
-cd aexis
-./run_services.sh
+./scripts/launch.py
 ```
 
 Access the visualizer at http://localhost:8000
 
-## Simulation
 
 To inject traffic into the live network:
 ```bash
-uv run python payload_injector.py
+python -m payload_injector
 ```

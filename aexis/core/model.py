@@ -4,7 +4,6 @@ from enum import Enum
 from typing import Any, Optional
 from uuid import uuid4
 
-
 class PodStatus(Enum):
     IDLE = "idle"
     LOADING = "loading"
@@ -12,13 +11,11 @@ class PodStatus(Enum):
     UNLOADING = "unloading"
     MAINTENANCE = "maintenance"
 
-
 class StationStatus(Enum):
     OPERATIONAL = "operational"
     CONGESTED = "congested"
     MAINTENANCE = "maintenance"
     OFFLINE = "offline"
-
 
 class Priority(Enum):
     LOW = 1
@@ -27,7 +24,6 @@ class Priority(Enum):
     URGENT = 4
     CRITICAL = 5
 
-
 @dataclass
 class Event:
     event_id: str = field(default_factory=lambda: str(uuid4()))
@@ -35,7 +31,6 @@ class Event:
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
     source: str = ""
     data: dict[str, Any] = field(default_factory=dict)
-
 
 @dataclass
 class PassengerArrival(Event):
@@ -46,8 +41,7 @@ class PassengerArrival(Event):
     priority: int = Priority.NORMAL.value
     group_size: int = 1
     special_needs: list[str] = field(default_factory=list)
-    wait_time_limit: int = 30  # minutes
-
+    wait_time_limit: int = 30
 
 @dataclass
 class PassengerPickedUp(Event):
@@ -57,7 +51,6 @@ class PassengerPickedUp(Event):
     station_id: str = ""
     pickup_time: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
 
-
 @dataclass
 class PassengerDelivered(Event):
     event_type: str = "PassengerDelivered"
@@ -65,9 +58,8 @@ class PassengerDelivered(Event):
     pod_id: str = ""
     station_id: str = ""
     delivery_time: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
-    total_travel_time: int = 0  # seconds
+    total_travel_time: int = 0
     satisfaction_score: float = 0.0
-
 
 @dataclass
 class CargoRequest(Event):
@@ -82,7 +74,6 @@ class CargoRequest(Event):
     temperature_controlled: bool = False
     deadline: datetime | None = None
 
-
 @dataclass
 class CargoLoaded(Event):
     event_type: str = "CargoLoaded"
@@ -90,7 +81,6 @@ class CargoLoaded(Event):
     pod_id: str = ""
     station_id: str = ""
     load_time: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'))
-
 
 @dataclass
 class CargoDelivered(Event):
@@ -102,7 +92,6 @@ class CargoDelivered(Event):
     condition: str = "good"
     on_time: bool = True
 
-
 @dataclass
 class PodStatusUpdate(Event):
     event_type: str = "PodStatusUpdate"
@@ -110,12 +99,11 @@ class PodStatusUpdate(Event):
     location: str = ""
     status: PodStatus = PodStatus.IDLE
     capacity_used: int = 0
-    capacity_total: int = 0  # Reverted to generic name, value depends on pod type
+    capacity_total: int = 0
     weight_used: float = 0.0
     weight_total: float = 0.0
-    # battery_level removed
-    current_route: Optional["Route"] = None
 
+    current_route: Optional["Route"] = None
 
 @dataclass
 class PodDecision(Event):
@@ -127,18 +115,16 @@ class PodDecision(Event):
     confidence: float = 0.0
     fallback_used: bool = False
 
-
 @dataclass
 class CongestionAlert(Event):
     event_type: str = "CongestionAlert"
     station_id: str = ""
-    congestion_level: float = 0.0  # 0.0-1.0
+    congestion_level: float = 0.0
     queue_length: int = 0
     average_wait_time: float = 0.0
     affected_routes: list[str] = field(default_factory=list)
     estimated_clear_time: datetime | None = None
     severity: str = "low"
-
 
 @dataclass
 class SystemSnapshot(Event):
@@ -148,16 +134,13 @@ class SystemSnapshot(Event):
     )
     system_state: dict[str, Any] = field(default_factory=dict)
 
-
-# Command Events
 @dataclass
 class Command(Event):
     command_id: str = field(default_factory=lambda: str(uuid4()))
     command_type: str = ""
     target: str = ""
-    target_type: str = "system"  # "pod", "station", or "system"
+    target_type: str = "system"
     parameters: dict[str, Any] = field(default_factory=dict)
-
 
 @dataclass
 class AssignRoute(Command):
@@ -168,7 +151,6 @@ class AssignRoute(Command):
     priority: int = Priority.NORMAL.value
     deadline: datetime | None = None
 
-
 @dataclass
 class UpdateCapacity(Command):
     command_type: str = "UpdateCapacity"
@@ -177,8 +159,6 @@ class UpdateCapacity(Command):
     max_pods: int = 0
     processing_rate: float = 0.0
 
-
-# Data Models
 @dataclass
 class Passenger:
     passenger_id: str
@@ -192,7 +172,6 @@ class Passenger:
     pickup_time: datetime | None = None
     delivery_time: datetime | None = None
     assigned_pod: str | None = None
-
 
 @dataclass
 class Cargo:
@@ -210,16 +189,14 @@ class Cargo:
     delivery_time: datetime | None = None
     assigned_pod: str | None = None
 
-
 @dataclass
 class Route:
     route_id: str
     stations: list[str]
-    estimated_duration: int = 0  # minutes
+    estimated_duration: int = 0
     distance: float = 0.0
-    traffic_level: float = 0.0  # 0.0-1.0
+    traffic_level: float = 0.0
     congestion_factor: float = 1.0
-
 
 @dataclass
 class DecisionContext:
@@ -228,18 +205,17 @@ class DecisionContext:
     current_route: Optional["Route"]
     capacity_available: int
     weight_available: float
-    # battery_level removed
+
     available_requests: list[dict[str, Any]]
     network_state: dict[str, Any]
     system_metrics: dict[str, Any]
-    # Enhanced pod type information
+
     pod_type: str = "unknown"
     pod_constraints: dict[str, Any] = None
     specialization: str = "general"
-    # Current payload for routing context
+
     passengers: list[dict[str, Any]] = None
     cargo: list[dict[str, Any]] = None
-
 
 @dataclass
 class Decision:
@@ -252,7 +228,6 @@ class Decision:
     reasoning: str
     fallback_used: bool = False
 
-
 @dataclass
 class DecisionOutcome:
     decision_id: str
@@ -262,73 +237,56 @@ class DecisionOutcome:
     cargo_on_time_rate: float
     lessons_learned: list[str] = field(default_factory=list)
 
-
-# ============================================================================
-# Network Positioning & Movement Models (Phase 1 Implementation)
-# ============================================================================
-
 @dataclass
 class Coordinate:
-    """2D coordinate in network space"""
     x: float
     y: float
 
     def distance_to(self, other: "Coordinate") -> float:
-        """Calculate Euclidean distance to another coordinate"""
         import math
         return math.sqrt((self.x - other.x) ** 2 + (self.y - other.y) ** 2)
 
     def interpolate(self, other: "Coordinate", t: float) -> "Coordinate":
-        """Interpolate between two coordinates (t: 0.0-1.0)"""
         t = max(0.0, min(1.0, t))
         return Coordinate(
             x=self.x + (other.x - self.x) * t,
             y=self.y + (other.y - self.y) * t
         )
 
-
 @dataclass
 class EdgeSegment:
-    """Network edge segment between two nodes"""
-    segment_id: str  # Format: "node_a->node_b"
+    segment_id: str
     start_node: str
     end_node: str
     start_coord: Coordinate
     end_coord: Coordinate
-    length: float = 0.0  # Cached Euclidean distance
+    length: float = 0.0
 
     def __post_init__(self):
-        """Calculate length if not provided"""
         if self.length == 0.0:
             self.length = self.start_coord.distance_to(self.end_coord)
 
     def get_point_at_distance(self, distance: float) -> Coordinate:
-        """Get coordinate at distance along segment (clamped 0 to length)"""
         if self.length == 0.0:
             return self.start_coord
         t = min(1.0, max(0.0, distance / self.length))
         return self.start_coord.interpolate(self.end_coord, t)
 
-
 @dataclass
 class LocationDescriptor:
-    """Describes a pod's location on the network"""
-    location_type: str  # "station" | "edge"
-    node_id: str = ""  # For station locations
-    edge_id: str = ""  # For edge locations (format: "node_a->node_b")
+    location_type: str
+    node_id: str = ""
+    edge_id: str = ""
     coordinate: Coordinate = field(default_factory=lambda: Coordinate(0, 0))
-    distance_on_edge: float = 0.0  # Progress along edge (0.0 to edge.length)
+    distance_on_edge: float = 0.0
 
     def __hash__(self):
-        """Make hashable for use in sets/dicts"""
         if self.location_type == "station":
             return hash(("station", self.node_id))
         return hash(("edge", self.edge_id, self.distance_on_edge))
 
-
 @dataclass
 class PodPositionUpdate(Event):
-    """Real-time pod position update for UI streaming"""
     event_type: str = "PodPositionUpdate"
     pod_id: str = ""
     location: LocationDescriptor = field(
@@ -340,7 +298,6 @@ class PodPositionUpdate(Event):
 
 @dataclass
 class PodArrival(Event):
-    """Event for pod arriving at a station"""
     event_type: str = "PodArrival"
     pod_id: str = ""
     station_id: str = ""

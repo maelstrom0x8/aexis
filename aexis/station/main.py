@@ -1,14 +1,3 @@
-"""Station process entry point.
-
-Usage:
-    python -m aexis.station.main --station-id station_001 --redis-url redis://localhost:6379
-
-Each station instance runs as a standalone process:
-  1. Connects to Redis
-  2. Subscribes to passenger/cargo/pod event channels
-  3. Manages its queue state in Redis hashes
-  4. Accepts dev commands on aexis:cmd:station:{id}
-"""
 
 import argparse
 import asyncio
@@ -29,21 +18,11 @@ from aexis.station import Station
 
 logger = logging.getLogger("aexis.station")
 
-
 async def _handle_commands(
     redis_client: redis.Redis,
     station: Station,
     message_bus: MessageBus,
 ):
-    """Listen for dev/ops commands on a dedicated Redis channel.
-
-    Supported commands:
-      {"cmd": "status"}
-      {"cmd": "inject_passenger", "destination": "station_003", ...}
-      {"cmd": "inject_cargo", "destination": "station_005", "weight": 100}
-
-    Responses are published to the channel specified in the "reply_to" field.
-    """
     channel = f"aexis:cmd:station:{station.station_id}"
     pubsub = redis_client.pubsub()
     await pubsub.subscribe(channel)
@@ -77,7 +56,7 @@ async def _handle_commands(
                     response["error"] = "destination required"
                 else:
                     pid = f"manual_p_{uuid.uuid4().hex[:8]}"
-                    # Create event directly since generators are removed
+
                     event = PassengerArrival(
                         passenger_id=pid,
                         station_id=station.station_id,
@@ -102,7 +81,7 @@ async def _handle_commands(
                     response["error"] = "destination required"
                 else:
                     rid = f"manual_c_{uuid.uuid4().hex[:8]}"
-                    # Create event directly since generators are removed
+
                     event = CargoRequest(
                         request_id=rid,
                         origin=station.station_id,
@@ -134,17 +113,13 @@ async def _handle_commands(
         await pubsub.unsubscribe(channel)
         await pubsub.aclose()
 
-
 async def run_station(args: argparse.Namespace):
-    """Main async entry point for a station process."""
     redis_url = args.redis_url
     redis_password = args.redis_password or os.getenv("REDIS_PASSWORD")
     station_id = args.station_id
 
-    # Setup structured logging
     setup_logging("station", station_id)
 
-    # Connect to Redis
     redis_client = redis.from_url(
         redis_url,
         password=redis_password,
@@ -158,13 +133,11 @@ async def run_station(args: argparse.Namespace):
         logger.error(f"Cannot connect to Redis at {redis_url}: {e}")
         return
 
-    # Connect message bus
     message_bus = MessageBus(redis_url=redis_url, password=redis_password)
     if not await message_bus.connect():
         logger.error("Failed to connect MessageBus")
         return
 
-    # Load network topology
     network_path = args.network_path or os.getenv(
         "AEXIS_NETWORK_DATA", "aexis/network.json"
     )
@@ -175,7 +148,6 @@ async def run_station(args: argparse.Namespace):
     else:
         logger.warning("No network data loaded — station running without topology")
 
-    # Determine connected stations from network graph
     connected: list[str] = []
     if network_data:
         nc = NetworkContext.get_instance()
@@ -186,25 +158,21 @@ async def run_station(args: argparse.Namespace):
                 if n.startswith("station_")
             ]
 
-    # Create station
     station = Station(message_bus, redis_client, station_id)
     station.connected_stations = connected
     await station.start()
 
-    # Resolve all station IDs for generators
     all_station_ids: list[str] = []
     if network_data:
         nc = NetworkContext.get_instance()
         all_station_ids = sorted(nc.station_positions.keys())
 
-    # Command listener
     cmd_task = asyncio.create_task(
         _handle_commands(
             redis_client, station, message_bus
         )
     )
 
-    # Bus listener
     bus_task = asyncio.create_task(message_bus.start_listening())
 
     shutdown_event = asyncio.Event()
@@ -221,10 +189,8 @@ async def run_station(args: argparse.Namespace):
         f"Station {station_id} running (connected to {len(connected)} neighbors)"
     )
 
-    # Wait for shutdown
     await shutdown_event.wait()
 
-    # Cleanup
     cmd_task.cancel()
     bus_task.cancel()
 
@@ -233,7 +199,6 @@ async def run_station(args: argparse.Namespace):
     await message_bus.disconnect()
     await redis_client.aclose()
     logger.info(f"Station {station_id} shut down")
-
 
 def main():
     parser = argparse.ArgumentParser(description="AEXIS Station Process")
@@ -259,7 +224,6 @@ def main():
     )
     args = parser.parse_args()
     asyncio.run(run_station(args))
-
 
 if __name__ == "__main__":
     main()
