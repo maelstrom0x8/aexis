@@ -14,7 +14,21 @@ AEXIS models interlinked transit stations where autonomous Pods (agents) service
 - **Production Resilient**: Robust error handling and managed infrastructure
 - **Mixed Transit**: Unified handling for both passengers and cargo
 
+
+## 🧠 DigitalOcean Gradient™ AI Integration
+
+AEXIS is built on a full-stack DigitalOcean architecture, ensuring speed, simplicity, and scale for autonomous decision-making.
+
+### Agentic Routing Capabilities
+The "brain" of each Pod is powered by the **DigitalOcean Gradient AI platform**. Rather than hardcoding static routing algorithms, AEXIS uses Large Language Models to handle complex, multi-variable logistics scenarios that traditional heuristics struggle with.
+
+- **[Gradient Agents](https://docs.digitalocean.com/products/gradient/concepts/agents/)**: Autonomous routing agents built with the Gradient ADK. These agents orchestrate the reasoning process, taking in dynamic system states (congestion, battery, current load) and producing an executable multi-stop route.
+- **[Gradient Knowledge Bases](https://docs.digitalocean.com/products/gradient/concepts/knowledge-bases/)**: Context-aware decision making. The system uses RAG to fetch and inject real-time network topology data (stored in DigitalOcean Spaces) into the prompt context, allowing the agent to "know" the map without extensive pre-training.
+- **[Gradient Guardrails](https://docs.digitalocean.com/products/gradient/concepts/guardrails/)**: Safety-critical constraints and schema enforcement protect the system against hallucinations. Every decision is validated against rigid operational boundaries before it's dispatched to a Pod's locomotion controllers.
+- **[Serverless Inference](https://docs.digitalocean.com/products/gradient/getting-started/serverless-inference/)**: High-performance models (such as Llama 3) power the underlying intelligence layer, providing low-latency analytical reasoning required for high-throughput transit networks.
+
 ---
+
 
 ## Setup & Installation
 
